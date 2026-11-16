@@ -144,7 +144,7 @@ def bucketize(sessions: list[dict[str, Any]], start: date, end: date, granularit
 
 CSV_HEADER = [
     "Datum", "Start", "Ende", "Status", "Plan", "Übung", "Gruppe", "Satz",
-    "Wiederholungen", "Sekunden", "Gewicht (kg)", "RPE", "Übersprungen", "Notiz",
+    "Wiederholungen", "Sekunden", "Gewicht (kg)", "RPE", "Übersprungen", "Notiz", "Archiviert",
 ]  # fmt: skip
 STATUS_LABELS = {"running": "laufend", "completed": "abgeschlossen", "cancelled": "abgebrochen"}
 
@@ -178,6 +178,7 @@ def build_csv(rows: list[dict[str, Any]]) -> str:
                 row["rpe"] if row["rpe"] is not None else "",
                 "ja" if row["skipped"] else "nein",
                 row["note"] or "",
+                "ja" if row.get("archived") else "nein",
             ]
         )
     return out.getvalue()

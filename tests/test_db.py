@@ -351,4 +351,4 @@ def test_export_csv(db: GymDatabase) -> None:
     assert len(lines) == 1 + 3 + 3 + 1
     assert lines[1].split(";")[5:11] == ["Beinpresse", "Beine & Rumpf", "1", "14", "", "62,5"]
     assert lines[4].split(";")[5:11] == ["Plank", "Beine & Rumpf", "1", "", "30", ""]
-    assert lines[7].split(";")[5:] == ["Brustpresse", "Oberkörper", "", "", "", "", "", "ja", "Schulter"]
+    assert lines[7].split(";")[5:] == ["Brustpresse", "Oberkörper", "", "", "", "", "", "ja", "Schulter", "nein"]

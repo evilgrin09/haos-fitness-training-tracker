@@ -84,7 +84,21 @@ MIGRATIONS: tuple[str, ...] = (
         PRIMARY KEY (entry_id, set_no)
     );
     """,
+    # 2: exercises that were added spontaneously to a single session
+    """
+    CREATE TABLE session_extras (
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+        created INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (session_id, exercise_id)
+    );
+    """,
 )
+
+KIND_WEIGHT = "weight"
+KIND_REPS = "reps"
+KIND_TIME = "time"
+KINDS = (KIND_WEIGHT, KIND_REPS, KIND_TIME)
 
 
 POINT_KEYS = (
@@ -100,6 +114,57 @@ class GymError(Exception):
         """Initialize the error."""
         super().__init__(message)
         self.code = code
+
+
+def exercise_kind(exercise: dict[str, Any]) -> str:
+    """Kind of an exercise: reps with weight, reps without weight, or time per set."""
+    if exercise["duration_s"] is not None:
+        return KIND_TIME
+    return KIND_WEIGHT if exercise["weighted"] else KIND_REPS
+
+
+def _int_between(value: Any, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def normalize_exercise(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate the form data of an exercise and turn it into column values."""
+    name = " ".join(str(data.get("name") or "").split())
+    if not name:
+        raise GymError("name_required", "The exercise needs a name")
+    kind = data.get("kind")
+    if len(name) > 100 or kind not in KINDS:
+        raise GymError("invalid_values", "Invalid name or kind")
+    if not _int_between(data.get("target_sets"), 1, 20):
+        raise GymError("invalid_values", "Sets must be between 1 and 20")
+    columns: dict[str, Any] = {
+        "name": name,
+        "muscle_group": " ".join(str(data.get("muscle_group") or "").split())[:60],
+        "setting": str(data.get("setting") or "").strip()[:300],
+        "hint": str(data.get("hint") or "").strip()[:1000],
+        "target_sets": data["target_sets"],
+        "reps_min": None,
+        "reps_max": None,
+        "duration_s": None,
+        "weighted": 0,
+        "start_weight": None,
+    }
+    if kind == KIND_TIME:
+        if not _int_between(data.get("duration_s"), 1, 3600):
+            raise GymError("invalid_values", "Duration must be greater than 0")
+        columns["duration_s"] = data["duration_s"]
+        return columns
+    low, high = data.get("reps_min"), data.get("reps_max")
+    if not _int_between(low, 1, 999) or not _int_between(high, 1, 999) or low > high:
+        raise GymError("invalid_values", "Repetitions must be greater than 0 and min <= max")
+    columns["reps_min"], columns["reps_max"] = low, high
+    if kind == KIND_WEIGHT:
+        weight = data.get("start_weight")
+        if not isinstance(weight, int | float) or isinstance(weight, bool) or not 0 < weight <= 1000:
+            raise GymError("invalid_values", "Start weight must be greater than 0")
+        columns["weighted"] = 1
+        columns["start_weight"] = float(weight)
+    return columns
 
 
 def _iso(moment: datetime) -> str:
@@ -189,21 +254,226 @@ class GymDatabase:
     def _exercise(self, row: dict[str, Any]) -> dict[str, Any]:
         row["weighted"] = bool(row["weighted"])
         row["archived"] = bool(row["archived"])
+        row["kind"] = exercise_kind(row)
         return row
+
+    def _plan_exercise(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Exercise for the plan editor: with the number of entries and the weight recorded last."""
+        count = self._one("SELECT COUNT(*) AS n FROM entries WHERE exercise_id = ? AND skipped = 0", (row["id"],))
+        last = self._one(
+            "SELECT s.local_date AS date, (SELECT MAX(t.weight) FROM entry_sets t WHERE t.entry_id = e.id) AS weight"
+            " FROM entries e JOIN sessions s ON s.id = e.session_id WHERE e.exercise_id = ? AND e.skipped = 0"
+            " ORDER BY s.started_at DESC, s.id DESC LIMIT 1",
+            (row["id"],),
+        )
+        assert count is not None
+        row["entry_count"] = count["n"]
+        row["last_weight"] = last["weight"] if last else None
+        row["last_date"] = last["date"] if last else None
+        return self._exercise(row)
 
     @_locked
     def get_plans(self) -> list[dict[str, Any]]:
-        """Return all plans with their active exercises."""
+        """Return all plans with their active exercises (in training order) and the archived ones."""
         plans = self._all("SELECT * FROM plans ORDER BY id")
         for plan in plans:
             plan["active"] = bool(plan["active"])
-            plan["exercises"] = [
-                self._exercise(row)
-                for row in self._all(
-                    "SELECT * FROM exercises WHERE plan_id = ? AND archived = 0 ORDER BY position", (plan["id"],)
-                )
-            ]
+            rows = self._all("SELECT * FROM exercises WHERE plan_id = ? ORDER BY position, id", (plan["id"],))
+            exercises = [self._plan_exercise(row) for row in rows]
+            plan["exercises"] = [e for e in exercises if not e["archived"]]
+            plan["archived_exercises"] = sorted(
+                (e for e in exercises if e["archived"]), key=lambda e: e["name"].casefold()
+            )
         return plans
+
+    # ------------------------------------------------------------ plan editing
+
+    def _require_unlocked(self) -> None:
+        if self.running_session_id() is not None:
+            raise GymError("session_running", "The plan cannot be changed while a session is running")
+
+    def _exercise_row(self, exercise_id: int) -> dict[str, Any]:
+        row = self._one("SELECT * FROM exercises WHERE id = ?", (exercise_id,))
+        if row is None:
+            raise GymError("not_found", f"Exercise {exercise_id} not found")
+        return row
+
+    def _check_name(self, plan_id: int, name: str, exclude_id: int | None = None, active_only: bool = False) -> None:
+        """A name may exist only once; an archived exercise of that name has to be restored instead."""
+        key = name.casefold()
+        for row in self._all("SELECT id, name, archived FROM exercises WHERE plan_id = ?", (plan_id,)):
+            if row["id"] == exclude_id or row["name"].casefold() != key:
+                continue
+            if not row["archived"]:
+                raise GymError("name_exists", f"An exercise named {name} already exists")
+            if not active_only:
+                raise GymError("name_archived", f"An archived exercise named {name} exists, restore it instead")
+
+    def _grouped(self, plan_id: int) -> list[tuple[str, list[int]]]:
+        """Active exercises as consecutive groups; exercises without group always come last."""
+        groups: dict[str, list[int]] = {}
+        for row in self._all(
+            "SELECT id, muscle_group FROM exercises WHERE plan_id = ? AND archived = 0 ORDER BY position, id",
+            (plan_id,),
+        ):
+            groups.setdefault(row["muscle_group"], []).append(row["id"])
+        if "" in groups:
+            groups[""] = groups.pop("")
+        return list(groups.items())
+
+    def _write_order(self, groups: list[tuple[str, list[int]]]) -> None:
+        """Number the active exercises 1..n without gaps, keeping every group together."""
+        position = 0
+        for _group, ids in groups:
+            for exercise_id in ids:
+                position += 1
+                self._conn.execute("UPDATE exercises SET position = ? WHERE id = ?", (position, exercise_id))
+
+    def _end_position(self, plan_id: int) -> int:
+        row = self._one("SELECT COALESCE(MAX(position), 0) + 1 AS pos FROM exercises WHERE plan_id = ?", (plan_id,))
+        assert row is not None
+        return row["pos"]
+
+    def _insert_exercise(self, plan_id: int, columns: dict[str, Any], archived: bool) -> int:
+        values = {**columns, "plan_id": plan_id, "position": self._end_position(plan_id), "archived": int(archived)}
+        cur = self._conn.execute(
+            f"INSERT INTO exercises ({', '.join(values)}) VALUES ({', '.join('?' * len(values))})",
+            tuple(values.values()),
+        )
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def _restore(self, exercise_id: int) -> None:
+        """Put an archived exercise back into the plan, at the end of its group."""
+        exercise = self._exercise_row(exercise_id)
+        if not exercise["archived"]:
+            return
+        self._check_name(exercise["plan_id"], exercise["name"], exclude_id=exercise_id, active_only=True)
+        self._conn.execute(
+            "UPDATE exercises SET archived = 0, position = ? WHERE id = ?",
+            (self._end_position(exercise["plan_id"]), exercise_id),
+        )
+        self._write_order(self._grouped(exercise["plan_id"]))
+
+    @_locked
+    def add_exercise(self, plan_id: int | None, data: dict[str, Any]) -> int:
+        """Add an exercise at the end of its group (without group: at the end of the plan)."""
+        self._require_unlocked()
+        if plan_id is None:
+            plan_id = self.default_plan_id()
+        columns = normalize_exercise(data)
+        self._check_name(plan_id, columns["name"])
+        with self._conn:
+            exercise_id = self._insert_exercise(plan_id, columns, archived=False)
+            self._write_order(self._grouped(plan_id))
+        return exercise_id
+
+    @_locked
+    def update_exercise(self, exercise_id: int, data: dict[str, Any]) -> None:
+        """Change an exercise. Past entries stay untouched; the kind is fixed once entries exist."""
+        self._require_unlocked()
+        exercise = self._exercise_row(exercise_id)
+        if exercise["archived"]:
+            raise GymError("archived", "Restore the exercise before changing it")
+        columns = normalize_exercise(data)
+        self._check_name(exercise["plan_id"], columns["name"], exclude_id=exercise_id)
+        if exercise_kind(columns) != exercise_kind(exercise) and self._one(
+            "SELECT id FROM entries WHERE exercise_id = ? AND skipped = 0 LIMIT 1", (exercise_id,)
+        ):
+            raise GymError("kind_locked", "The kind cannot be changed once entries exist")
+        if columns["muscle_group"] != exercise["muscle_group"]:
+            columns["position"] = self._end_position(exercise["plan_id"])
+        with self._conn:
+            self._conn.execute(
+                f"UPDATE exercises SET {', '.join(f'{key} = ?' for key in columns)} WHERE id = ?",
+                (*columns.values(), exercise_id),
+            )
+            self._write_order(self._grouped(exercise["plan_id"]))
+
+    @_locked
+    def move_exercise(self, exercise_id: int, direction: int) -> None:
+        """Move an exercise one step up (-1) or down (+1) within its group."""
+        self._require_unlocked()
+        exercise = self._exercise_row(exercise_id)
+        groups = self._grouped(exercise["plan_id"])
+        ids = next((ids for _group, ids in groups if exercise_id in ids), None)
+        if ids is None:
+            raise GymError("archived", "Archived exercises cannot be moved")
+        index = ids.index(exercise_id)
+        target = index + direction
+        if not 0 <= target < len(ids):
+            raise GymError("edge", "The exercise is already at the edge of its group")
+        ids[index], ids[target] = ids[target], ids[index]
+        with self._conn:
+            self._write_order(groups)
+
+    @_locked
+    def move_group(self, plan_id: int | None, group: str, direction: int) -> None:
+        """Move a whole group one step up (-1) or down (+1)."""
+        self._require_unlocked()
+        if plan_id is None:
+            plan_id = self.default_plan_id()
+        groups = self._grouped(plan_id)
+        names = [name for name, _ids in groups]
+        if group not in names:
+            raise GymError("not_found", f"Group {group} not found")
+        index = names.index(group)
+        target = index + direction
+        if not group or not 0 <= target < len(groups) or not names[target]:
+            raise GymError("edge", "The group cannot be moved further")
+        groups[index], groups[target] = groups[target], groups[index]
+        with self._conn:
+            self._write_order(groups)
+
+    @_locked
+    def archive_exercise(self, exercise_id: int) -> None:
+        """Take an exercise out of the plan. Its entries stay in history and statistics."""
+        self._require_unlocked()
+        exercise = self._exercise_row(exercise_id)
+        with self._conn:
+            self._conn.execute("UPDATE exercises SET archived = 1 WHERE id = ?", (exercise_id,))
+            self._write_order(self._grouped(exercise["plan_id"]))
+
+    @_locked
+    def restore_exercise(self, exercise_id: int) -> None:
+        """Bring an archived exercise back, with its values and its history."""
+        self._require_unlocked()
+        with self._conn:
+            self._restore(exercise_id)
+
+    @_locked
+    def add_session_exercise(
+        self, session_id: int, data: dict[str, Any] | None = None, exercise_id: int | None = None
+    ) -> int:
+        """Add a spontaneous exercise to the running session.
+
+        It stays outside the plan (archived) until the session is finished and
+        the user decides to adopt it. An archived exercise can be reused.
+        """
+        session = self._session_row(session_id)
+        if session["status"] != STATUS_RUNNING:
+            raise GymError("not_running", "Session is not running")
+        with self._conn:
+            if exercise_id is not None:
+                exercise = self._exercise_row(exercise_id)
+                if exercise["plan_id"] != session["plan_id"] or not exercise["archived"]:
+                    raise GymError("name_exists", "The exercise is already part of the plan")
+                created = 0
+            else:
+                columns = normalize_exercise(data or {})
+                self._check_name(session["plan_id"], columns["name"])
+                exercise_id = self._insert_exercise(session["plan_id"], columns, archived=True)
+                created = 1
+            self._conn.execute(
+                "INSERT OR IGNORE INTO session_extras (session_id, exercise_id, created) VALUES (?, ?, ?)",
+                (session_id, exercise_id, created),
+            )
+        return exercise_id
+
+    def _drop_unused_extras(self, session_id: int) -> list[int]:
+        """Ids of exercises created for this session only, to be removed with it if never recorded."""
+        rows = self._all("SELECT exercise_id FROM session_extras WHERE session_id = ? AND created = 1", (session_id,))
+        return [row["exercise_id"] for row in rows]
 
     @_locked
     def default_plan_id(self) -> int:
@@ -265,8 +535,12 @@ class GymDatabase:
             self._conn.execute("UPDATE sessions SET note = ? WHERE id = ?", (note, session_id))
 
     @_locked
-    def finish_session(self, session_id: int, now: datetime) -> None:
-        """Mark a running session as completed."""
+    def finish_session(self, session_id: int, now: datetime, adopt: tuple[int, ...] | list[int] = ()) -> None:
+        """Mark a running session as completed.
+
+        Spontaneous exercises listed in ``adopt`` become regular plan exercises,
+        the others stay archived (their entries are kept).
+        """
         session = self._session_row(session_id)
         if session["status"] != STATUS_RUNNING:
             raise GymError("not_running", "Session is not running")
@@ -280,6 +554,10 @@ class GymDatabase:
             self._conn.execute(
                 "UPDATE sessions SET status = ?, ended_at = ? WHERE id = ?", (STATUS_COMPLETED, _iso(end), session_id)
             )
+            extras = self._all("SELECT exercise_id FROM session_extras WHERE session_id = ?", (session_id,))
+            for row in extras:
+                if row["exercise_id"] in adopt:
+                    self._restore(row["exercise_id"])
 
     @_locked
     def cancel_session(self, session_id: int, now: datetime) -> bool:
@@ -308,8 +586,15 @@ class GymDatabase:
     def delete_session(self, session_id: int) -> None:
         """Delete a session including its entries."""
         self._session_row(session_id)
+        created = self._drop_unused_extras(session_id)
         with self._conn:
             self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            for exercise_id in created:
+                self._conn.execute(
+                    "DELETE FROM exercises WHERE id = ? AND archived = 1"
+                    " AND NOT EXISTS (SELECT 1 FROM entries WHERE exercise_id = ?)",
+                    (exercise_id, exercise_id),
+                )
 
     # ---------------------------------------------------------------- entries
 
@@ -420,11 +705,20 @@ class GymDatabase:
     def session_detail(self, session_id: int) -> dict[str, Any]:
         """A session with one item per exercise: plan data, defaults, previous and current entry."""
         session = self._session_row(session_id)
+        extras = [
+            row["exercise_id"]
+            for row in self._all(
+                "SELECT exercise_id FROM session_extras WHERE session_id = ? ORDER BY rowid", (session_id,)
+            )
+        ]
         exercises = self._all(
             "SELECT * FROM exercises WHERE plan_id = ? AND (archived = 0 OR id IN"
-            " (SELECT exercise_id FROM entries WHERE session_id = ?)) ORDER BY position",
-            (session["plan_id"], session_id),
+            " (SELECT exercise_id FROM entries WHERE session_id = ?) OR id IN"
+            " (SELECT exercise_id FROM session_extras WHERE session_id = ?)) ORDER BY archived, position, id",
+            (session["plan_id"], session_id, session_id),
         )
+        # Spontaneous exercises always come after the regular ones, in the order they were added.
+        exercises.sort(key=lambda row: extras.index(row["id"]) + 1 if row["id"] in extras else 0)
         entries = {
             row["exercise_id"]: self._entry(row)
             for row in self._all("SELECT * FROM entries WHERE session_id = ?", (session_id,))
@@ -440,6 +734,7 @@ class GymDatabase:
             items.append(
                 {
                     "exercise": exercise,
+                    "adhoc": exercise["id"] in extras,
                     "defaults": logic.next_defaults(exercise, previous),
                     "previous": previous,
                     "entry": entry,
@@ -582,7 +877,8 @@ class GymDatabase:
         """All data, one row per set (skipped exercises: one row without set)."""
         return self._all(
             "SELECT s.local_date AS date, s.started_at, s.ended_at, s.status, p.name AS plan,"
-            " x.name AS exercise, x.muscle_group, t.set_no, t.reps, t.seconds, t.weight, e.rpe, e.skipped, e.note"
+            " x.name AS exercise, x.muscle_group, t.set_no, t.reps, t.seconds, t.weight, e.rpe, e.skipped, e.note,"
+            " x.archived"
             " FROM entries e JOIN sessions s ON s.id = e.session_id JOIN plans p ON p.id = s.plan_id"
             " JOIN exercises x ON x.id = e.exercise_id LEFT JOIN entry_sets t ON t.entry_id = e.id"
             " ORDER BY s.started_at, s.id, x.position, t.set_no"

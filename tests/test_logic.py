@@ -132,6 +132,7 @@ def test_build_csv() -> None:
     assert lines[0].startswith("﻿Datum;Start;Ende;Status;Plan;Übung")
     assert lines[1] == (
         '2026-11-16;2026-11-16T17:00:00+00:00;;abgeschlossen;Ganzkörper-Training;Beinpresse;'
-        'Beine & Rumpf;1;14;;62,5;7;nein;"gut; leicht"'
+        'Beine & Rumpf;1;14;;62,5;7;nein;"gut; leicht";nein'
     )
-    assert lines[2].endswith(';;;;;;ja;"gut; leicht"')
+    assert lines[2].endswith(';;;;;;ja;"gut; leicht";nein')
+    assert logic.build_csv([{**row, "archived": 1}]).split("\r\n")[1].endswith(";ja")

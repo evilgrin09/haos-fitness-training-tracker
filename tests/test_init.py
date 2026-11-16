@@ -183,3 +183,53 @@ async def test_data_survives_reload_and_removal(hass: HomeAssistant, entry, hass
     await hass.async_block_till_done()
     assert PANEL_URL_PATH not in hass.data["frontend_panels"]
     assert (tmp_path / DB_FILE).exists()
+
+
+async def test_plan_editing_and_spontaneous_exercise(hass: HomeAssistant, entry, hass_ws_client) -> None:
+    client = await hass_ws_client(hass)
+    new = {"name": "Wadenheben", "kind": "weight", "target_sets": 3, "reps_min": 12, "reps_max": 14, "start_weight": 40}
+    plans = await _ws(client, "exercise/add", **new, muscle_group="Beine & Rumpf", setting="Stufe 3")
+    names = [e["name"] for e in plans[0]["exercises"]]
+    assert names.index("Wadenheben") == 4
+    calf = plans[0]["exercises"][4]
+    assert (calf["kind"], calf["start_weight"], calf["setting"]) == ("weight", 40, "Stufe 3")
+
+    plans = await _ws(client, "exercise/update", exercise_id=calf["id"], **{**new, "target_sets": 4})
+    assert plans[0]["exercises"][-1]["name"] == "Wadenheben"  # group removed: end of plan
+    assert plans[0]["exercises"][-1]["target_sets"] == 4
+    plans = await _ws(client, "exercise/move", exercise_id=plans[0]["exercises"][0]["id"], direction="down")
+    assert [e["name"] for e in plans[0]["exercises"]][:2] == ["Beinbeuger (liegend)", "Beinpresse"]
+    plans = await _ws(client, "exercise/move_group", group="Arme", direction="up")
+    assert plans[0]["exercises"][4]["muscle_group"] == "Arme"
+    plans = await _ws(client, "exercise/archive", exercise_id=calf["id"])
+    assert [e["name"] for e in plans[0]["archived_exercises"]] == ["Wadenheben"]
+    assert [e["position"] for e in plans[0]["exercises"]] == list(range(1, 11))
+
+    await client.send_json_auto_id({"type": f"{DOMAIN}/exercise/add", **new})
+    assert (await client.receive_json())["error"]["code"] == "name_archived"
+    await client.send_json_auto_id({"type": f"{DOMAIN}/exercise/add", **{**new, "name": "Neu", "reps_min": 20}})
+    assert (await client.receive_json())["error"]["code"] == "invalid_values"
+
+    # Spontaneous exercises: one new, one taken from the archive.
+    session = await _ws(client, "session/start")
+    await client.send_json_auto_id({"type": f"{DOMAIN}/exercise/restore", "exercise_id": calf["id"]})
+    assert (await client.receive_json())["error"]["code"] == "session_running"
+    added = await _ws(client, "session/add_exercise", session_id=session["id"], name="Seitstütz", kind="time",
+                      target_sets=2, duration_s=45)  # fmt: skip
+    reused = await _ws(client, "session/add_exercise", session_id=session["id"], exercise_id=calf["id"])
+    assert reused["exercise_id"] == calf["id"]
+    items = reused["session"]["items"]
+    assert [(i["exercise"]["name"], i["adhoc"]) for i in items[-2:]] == [("Seitstütz", True), ("Wadenheben", True)]
+    side = added["exercise_id"]
+    await _ws(client, "entry/save", session_id=session["id"], exercise_id=side, sets=2, seconds=45, rpe=6)
+    await _ws(client, "entry/save", session_id=session["id"], exercise_id=calf["id"], sets=4, reps=14, weight=40, rpe=7)
+    finished = await _ws(client, "session/finish", session_id=session["id"], adopt=[calf["id"]])
+    assert finished["summary"]["done"] == 2
+    overview = await _ws(client, "overview")
+    plan = overview["plans"][0]
+    assert plan["exercises"][-1]["name"] == "Wadenheben"
+    assert [e["name"] for e in plan["archived_exercises"]] == ["Seitstütz"]
+    assert plan["archived_exercises"][0]["entry_count"] == 1
+    stats = await _ws(client, "stats/exercise", exercise_id=added["exercise_id"], range="all")
+    assert stats["exercise"]["archived"] is True
+    assert len(stats["points"]) == 1

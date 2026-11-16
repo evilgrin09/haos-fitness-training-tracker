@@ -14,12 +14,30 @@ import voluptuous as vol
 
 from . import logic
 from .const import DOMAIN
-from .db import GymDatabase, GymError
+from .db import KINDS, GymDatabase, GymError
 from .store import GymStore
 
 _RANGE = vol.In(list(logic.RANGE_DAYS))
 _ID = vol.All(vol.Coerce(int), vol.Range(min=1))
 _OPT_INT = vol.Any(None, vol.All(vol.Coerce(int), vol.Range(min=0)))
+
+_DIRECTION = vol.All(vol.In(["up", "down"]), lambda value: -1 if value == "up" else 1)
+_OPT_STR = vol.Any(None, cv.string)
+
+# "type" is reserved by the websocket protocol, so the kind of an exercise is sent as "kind".
+EXERCISE_SCHEMA = {
+    vol.Required("name"): cv.string,
+    vol.Required("kind"): vol.In(KINDS),
+    vol.Required("target_sets"): vol.Coerce(int),
+    vol.Optional("reps_min"): vol.Any(None, vol.Coerce(int)),
+    vol.Optional("reps_max"): vol.Any(None, vol.Coerce(int)),
+    vol.Optional("duration_s"): vol.Any(None, vol.Coerce(int)),
+    vol.Optional("start_weight"): vol.Any(None, vol.Coerce(float)),
+    vol.Optional("muscle_group"): _OPT_STR,
+    vol.Optional("setting"): _OPT_STR,
+    vol.Optional("hint"): _OPT_STR,
+}
+EXERCISE_FIELDS = tuple(str(key) for key in EXERCISE_SCHEMA)
 
 Handler = Callable[[HomeAssistant, GymStore, dict[str, Any]], Awaitable[Any]]
 
@@ -107,13 +125,13 @@ async def ws_session_update(hass: HomeAssistant, store: GymStore, msg: dict[str,
     return await store.async_write(job)
 
 
-@_command("session/finish", {vol.Required("session_id"): _ID})
+@_command("session/finish", {vol.Required("session_id"): _ID, vol.Optional("adopt", default=list): [_ID]})
 async def ws_session_finish(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
     """Complete the running session."""
     now = dt_util.utcnow()
 
     def job(db: GymDatabase) -> dict[str, Any]:
-        db.finish_session(msg["session_id"], now)
+        db.finish_session(msg["session_id"], now, msg["adopt"])
         return db.session_detail(msg["session_id"])
 
     return await store.async_write(job)
@@ -203,6 +221,71 @@ async def ws_stats_exercise(hass: HomeAssistant, store: GymStore, msg: dict[str,
     return await store.async_read(lambda db: db.exercise_stats(msg["exercise_id"], since))
 
 
+def _exercise_data(msg: dict[str, Any]) -> dict[str, Any]:
+    return {key: msg.get(key) for key in EXERCISE_FIELDS}
+
+
+def _plan_command(name: str, schema: dict[Any, Any], change: Callable[[GymDatabase, dict[str, Any]], Any]) -> Any:
+    """Command that changes the plan and returns all plans afterwards."""
+
+    async def handler(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> list[dict[str, Any]]:
+        def job(db: GymDatabase) -> list[dict[str, Any]]:
+            change(db, msg)
+            return db.get_plans()
+
+        return await store.async_write(job)
+
+    return _command(name, schema)(handler)
+
+
+ws_exercise_add = _plan_command(
+    "exercise/add",
+    {vol.Optional("plan_id"): _ID, **EXERCISE_SCHEMA},
+    lambda db, msg: db.add_exercise(msg.get("plan_id"), _exercise_data(msg)),
+)
+ws_exercise_update = _plan_command(
+    "exercise/update",
+    {vol.Required("exercise_id"): _ID, **EXERCISE_SCHEMA},
+    lambda db, msg: db.update_exercise(msg["exercise_id"], _exercise_data(msg)),
+)
+ws_exercise_move = _plan_command(
+    "exercise/move",
+    {vol.Required("exercise_id"): _ID, vol.Required("direction"): _DIRECTION},
+    lambda db, msg: db.move_exercise(msg["exercise_id"], msg["direction"]),
+)
+ws_group_move = _plan_command(
+    "exercise/move_group",
+    {vol.Optional("plan_id"): _ID, vol.Required("group"): cv.string, vol.Required("direction"): _DIRECTION},
+    lambda db, msg: db.move_group(msg.get("plan_id"), msg["group"], msg["direction"]),
+)
+ws_exercise_archive = _plan_command(
+    "exercise/archive", {vol.Required("exercise_id"): _ID}, lambda db, msg: db.archive_exercise(msg["exercise_id"])
+)
+ws_exercise_restore = _plan_command(
+    "exercise/restore", {vol.Required("exercise_id"): _ID}, lambda db, msg: db.restore_exercise(msg["exercise_id"])
+)
+
+
+@_command(
+    "session/add_exercise",
+    {
+        vol.Required("session_id"): _ID,
+        vol.Optional("exercise_id"): _ID,
+        **{vol.Optional(str(key)): value for key, value in EXERCISE_SCHEMA.items()},
+    },
+)
+async def ws_session_add_exercise(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+    """Add a spontaneous exercise (new, or an archived one) to the running session."""
+
+    def job(db: GymDatabase) -> dict[str, Any]:
+        exercise_id = db.add_session_exercise(
+            msg["session_id"], None if "exercise_id" in msg else _exercise_data(msg), msg.get("exercise_id")
+        )
+        return {"exercise_id": exercise_id, "session": db.session_detail(msg["session_id"])}
+
+    return await store.async_write(job)
+
+
 @callback
 def async_register(hass: HomeAssistant) -> None:
     """Register all websocket commands."""
@@ -220,6 +303,13 @@ def async_register(hass: HomeAssistant) -> None:
         ws_sessions,
         ws_stats_overview,
         ws_stats_exercise,
+        ws_exercise_add,
+        ws_exercise_update,
+        ws_exercise_move,
+        ws_group_move,
+        ws_exercise_archive,
+        ws_exercise_restore,
+        ws_session_add_exercise,
     ):
         websocket_api.async_register_command(hass, command)
 

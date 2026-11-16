@@ -33,6 +33,14 @@ const RPE_TEXT = {
 const WEIGHT_STEPS = [0.5, 1, 2.5];
 const RPE_TICKS = [2, 4, 6, 8, 10];
 
+const KINDS = [
+  ["weight", "Gewicht", "Wdh. mit Gewicht"],
+  ["reps", "Ohne Gewicht", "nur Wdh."],
+  ["time", "Sekunden", "Zeit pro Satz"],
+];
+
+const NEW_EXERCISE = { kind: "weight", target_sets: 3, reps_min: 12, reps_max: 14, duration_s: 30, start_weight: 20 };
+
 /* ---------------------------------------------------------------- helpers */
 
 function esc(value) {
@@ -327,9 +335,34 @@ select, input[type=text] { width: 100%; min-height: 48px; font: inherit; color: 
   color: var(--gt-text); font: inherit; font-size: 18px; font-weight: 500; cursor: pointer; padding: 0; }
 .rpe button.active { background: var(--gt-primary); border-color: var(--gt-primary); color: var(--gt-on-primary); }
 .rpe-text { min-height: 22px; margin-top: 8px; font-size: 14px; color: var(--gt-muted); }
+.group-head { display: flex; align-items: center; gap: 8px; margin: 18px 0 6px; font-size: 13px; font-weight: 500;
+  color: var(--gt-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.group-head span { flex: 1; }
+.rowbtns { display: flex; gap: 6px; margin-left: auto; }
+.rowbtns .btn.slim { padding: 6px 10px; font-size: 14px; min-width: 40px; }
+.list li.wrap { flex-wrap: wrap; }
+.list li.wrap .grow { min-width: 110px; }
+.kinds { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.kinds button { min-height: 68px; border-radius: 12px; border: 1px solid var(--gt-divider); background: var(--gt-surface);
+  color: var(--gt-text); font: inherit; font-weight: 500; cursor: pointer; padding: 8px 4px; }
+.kinds button small { display: block; font-weight: 400; font-size: 12px; color: var(--gt-muted); }
+.kinds button.active { background: var(--gt-primary); border-color: var(--gt-primary); color: var(--gt-on-primary); }
+.kinds button.active small { color: inherit; opacity: 0.85; }
+.kinds button:disabled { opacity: 0.5; cursor: default; }
+.kinds button.active:disabled { opacity: 1; }
+.hint { font-size: 13px; color: var(--gt-muted); margin-top: 6px; }
+.suggest button { display: block; width: 100%; text-align: left; margin-top: 6px; padding: 10px 12px; min-height: 44px;
+  border-radius: 10px; border: 1px dashed var(--gt-primary); background: var(--gt-surface); color: var(--gt-text);
+  font: inherit; font-size: 15px; cursor: pointer; }
+.toggle { background: none; border: 0; color: var(--gt-primary); font: inherit; font-weight: 500; padding: 10px 0;
+  min-height: 44px; cursor: pointer; text-align: left; width: 100%; }
+textarea { width: 100%; min-height: 84px; font: inherit; color: var(--gt-text); background: var(--gt-surface);
+  border: 1px solid var(--gt-divider); border-radius: 10px; padding: 8px 12px; resize: vertical; }
+.yesno { display: flex; gap: 6px; flex: none; }
+.yesno .chip { min-width: 56px; min-height: 44px; }
 .toast { position: fixed; left: 50%; top: calc(116px + env(safe-area-inset-top)); transform: translateX(-50%);
   background: var(--gt-text); color: var(--gt-bg); padding: 10px 16px; border-radius: 8px; z-index: 30; display: none;
-  max-width: 90%; font-size: 14px; }
+  max-width: 90%; font-size: 14px; pointer-events: none; }
 .toast.error { background: var(--gt-error); color: #fff; }
 `;
 
@@ -347,6 +380,9 @@ class GymTrackerPanel extends HTMLElement {
     this._summary = null;
     this._form = null;
     this._confirm = null;
+    this._exForm = null;
+    this._adopt = null;
+    this._archOpen = false;
     this._range = "3m";
     this._stats = null;
     this._exStats = null;
@@ -392,7 +428,8 @@ class GymTrackerPanel extends HTMLElement {
         this._resizeTimer = setTimeout(() => this._drawCharts(), 100);
       });
       this._onVisible = () => {
-        if (document.visibilityState === "visible" && this._hass && !this._form) this._loadOverview();
+        const editing = this._form || this._exForm || this._adopt || this._confirm;
+        if (document.visibilityState === "visible" && this._hass && !editing) this._loadOverview();
       };
     }
     this._resizeObserver.observe(this);
@@ -438,6 +475,7 @@ class GymTrackerPanel extends HTMLElement {
   async _run(fn) {
     if (this._busy) return;
     this._busy = true;
+    this._epoch = (this._epoch || 0) + 1;
     try {
       await fn();
     } catch (err) {
@@ -453,6 +491,14 @@ class GymTrackerPanel extends HTMLElement {
       not_running: "Dieses Training läuft nicht mehr.",
       not_found: "Der Eintrag wurde nicht gefunden.",
       not_loaded: "Gym Tracker ist nicht eingerichtet.",
+      name_required: "Bitte einen Namen eingeben.",
+      name_exists: "Eine Übung mit diesem Namen gibt es bereits im Plan.",
+      name_archived: "Eine archivierte Übung heißt so – bitte den Vorschlag unter dem Namen wählen, um sie wiederherzustellen.",
+      invalid_values: "Bitte die Werte prüfen: alle Werte größer 0, Wdh. von ≤ bis.",
+      kind_locked: "Die Art kann nicht geändert werden, weil es bereits Einträge gibt.",
+      session_running: "Während eines laufenden Trainings ist der Plan gesperrt.",
+      edge: "Weiter lässt sich das nicht verschieben.",
+      archived: "Die Übung ist archiviert – bitte zuerst wiederherstellen.",
     };
     return known[err?.code] || err?.message || "Unbekannter Fehler";
   }
@@ -467,12 +513,17 @@ class GymTrackerPanel extends HTMLElement {
   }
 
   async _loadOverview() {
+    // An action started while this request was under way has newer data: drop the stale answer.
+    const epoch = this._epoch;
+    let overview;
     try {
-      this._ov = await this._call("overview");
+      overview = await this._call("overview");
     } catch (err) {
       this._toast(this._errorText(err), true);
       return;
     }
+    if (epoch !== this._epoch || this._busy) return;
+    this._ov = overview;
     this._session = this._ov.active_session;
     if (!this._session && ["warmup", "exercise", "list"].includes(this._view)) this._view = "home";
     if (this._exerciseId === null) this._exerciseId = this._ov.plans[0]?.exercises[0]?.id ?? null;
@@ -523,6 +574,7 @@ class GymTrackerPanel extends HTMLElement {
     if (this._session && this._view === "warmup") return this._renderWarmup();
     if (this._session && this._view === "exercise") return this._renderExercise();
     if (this._session && this._view === "list") return this._renderList();
+    if (!this._session && this._view === "plan") return this._renderPlan();
     return this._renderHome();
   }
 
@@ -555,11 +607,14 @@ class GymTrackerPanel extends HTMLElement {
           <div class="small muted">${recorded} von ${s.items.length} Übungen erfasst</div>
           <button class="btn primary big" data-action="resume">Training fortsetzen</button>
           <button class="btn danger" data-action="cancel-session">Training abbrechen</button>
+          <button class="btn" disabled>Plan bearbeiten</button>
+          <div class="small muted" style="text-align:center">Während eines laufenden Trainings ist der Plan gesperrt.</div>
         </div>`;
     } else if (plan) {
       start = `<div class="stack" style="margin-bottom:16px">
           <button class="btn primary big" data-action="start">Training starten</button>
           <div class="small muted" style="text-align:center">${esc(plan.name)} · ${plan.exercises.length} Übungen</div>
+          <button class="btn" data-action="plan">Plan bearbeiten</button>
         </div>`;
     } else {
       start = `<div class="empty">Kein Trainingsplan vorhanden.</div>`;
@@ -574,6 +629,56 @@ class GymTrackerPanel extends HTMLElement {
         ${this._tile("Letztes Training", esc(relDay(summary.last_date, today)), summary.last_date ? shortDate(summary.last_date) : "")}
       </div>
       <div class="card"><h3>Letzte Einheiten</h3>${list}</div>`;
+  }
+
+  _planText(ex) {
+    return `${targetText(ex)}${ex.kind === "weight" ? ` · ${kg(ex.last_weight ?? ex.start_weight)}` : ""}`;
+  }
+
+  _renderPlan() {
+    const plan = this._ov.plans[0];
+    const groups = [];
+    for (const ex of plan.exercises) {
+      if (!groups.length || groups[groups.length - 1].name !== ex.muscle_group) groups.push({ name: ex.muscle_group, items: [] });
+      groups[groups.length - 1].items.push(ex);
+    }
+    const named = groups.filter((g) => g.name).length;
+    const move = (action, attrs, dir, off, label) =>
+      `<button class="btn slim" data-action="${action}" ${attrs} data-dir="${dir}" ${off ? "disabled" : ""} aria-label="${label}">${dir === "up" ? "↑" : "↓"}</button>`;
+    const blocks = groups
+      .map((g, gi) => {
+        const attrs = `data-group="${esc(g.name)}"`;
+        const head = `<div class="group-head"><span>${esc(g.name || "Ohne Gruppe")}</span>
+          ${g.name && named > 1 ? `${move("group-move", attrs, "up", gi === 0, "Gruppe nach oben")}${move("group-move", attrs, "down", gi >= named - 1, "Gruppe nach unten")}` : ""}</div>`;
+        const rows = g.items
+          .map((ex, i) => `<li class="wrap" data-action="ex-edit" data-id="${ex.id}">
+              <div class="grow"><div class="title">${esc(ex.name)}</div><div class="small muted">${esc(this._planText(ex))}</div></div>
+              <div class="rowbtns">
+                ${move("ex-move", `data-id="${ex.id}"`, "up", i === 0, "Nach oben")}
+                ${move("ex-move", `data-id="${ex.id}"`, "down", i === g.items.length - 1, "Nach unten")}
+                <button class="btn slim" data-action="ex-archive" data-id="${ex.id}">Archivieren</button>
+              </div></li>`)
+          .join("");
+        return `${head}<div class="card"><ul class="list">${rows}</ul></div>`;
+      })
+      .join("");
+    const archived = plan.archived_exercises;
+    const archive = archived.length
+      ? `<button class="toggle" data-action="arch-toggle">${this._archOpen ? "▾" : "▸"} Archivierte Übungen (${archived.length})</button>
+        ${this._archOpen
+          ? `<div class="card"><ul class="list">${archived
+              .map((ex) => `<li class="wrap"><div class="grow"><div class="title">${esc(ex.name)}</div>
+                <div class="small muted">${esc(this._planText(ex))}${ex.entry_count ? ` · ${ex.entry_count}× trainiert` : ""}</div></div>
+                <div class="rowbtns"><button class="btn slim" data-action="ex-restore" data-id="${ex.id}">Wiederherstellen</button></div></li>`)
+              .join("")}</ul></div>`
+          : ""}`
+      : "";
+    return `<div class="topline"><button class="btn slim" data-action="home">‹ Zurück</button><span>${esc(plan.name)}</span></div>
+      <h1>Plan bearbeiten</h1>
+      <div class="small muted">Antippen zum Bearbeiten. Änderungen gelten ab dem nächsten Training.</div>
+      ${blocks || `<div class="empty">Noch keine Übungen im Plan.</div>`}
+      <div style="margin:16px 0 8px"><button class="btn primary" data-action="ex-add">+ Übung hinzufügen</button></div>
+      ${archive}`;
   }
 
   _renderWarmup() {
@@ -602,7 +707,7 @@ class GymTrackerPanel extends HTMLElement {
     const last = previous
       ? `<div class="small muted" style="margin-bottom:12px">Zuletzt (${esc(shortDate(previous.date))}): ${esc(entryText(previous))}</div>`
       : `<div class="small muted" style="margin-bottom:12px">Erstes Training dieser Übung${ex.weighted ? " – Gewicht laut Plan" : ""}</div>`;
-    return `<div class="topline"><span>Übung ${this._idx + 1}/${items.length} · ${esc(ex.muscle_group)}</span>
+    return `<div class="topline"><span>Übung ${this._idx + 1}/${items.length}${ex.muscle_group ? ` · ${esc(ex.muscle_group)}` : ""}${item.adhoc ? " · spontan" : ""}</span>
         <button class="btn slim" data-action="list">Übersicht</button></div>
       <div class="progress"><div style="width:${(recorded / items.length) * 100}%"></div></div>
       <h1>${esc(ex.name)}</h1>
@@ -627,6 +732,10 @@ class GymTrackerPanel extends HTMLElement {
       </div>`;
   }
 
+  _badges(item) {
+    return `${item.adhoc ? ` <span class="badge">spontan</span>` : ""}${item.exercise.archived ? ` <span class="badge">archiviert</span>` : ""}`;
+  }
+
   _stateIcon(entry, current = false) {
     if (entry && entry.skipped) return `<span class="state" title="Übersprungen">↷</span>`;
     if (entry) return `<span class="state done" title="Erfasst">✓</span>`;
@@ -639,7 +748,7 @@ class GymTrackerPanel extends HTMLElement {
     const open = s.items.filter((i) => !i.entry).length;
     const rows = s.items
       .map((item, idx) => `<li data-action="goto" data-idx="${idx}">${this._stateIcon(item.entry)}
-          <div class="grow"><div class="title">${esc(item.exercise.name)}</div>
+          <div class="grow"><div class="title">${esc(item.exercise.name)}${item.adhoc ? ` <span class="badge">spontan</span>` : ""}</div>
           <div class="small muted">${esc(item.entry ? entryText(item.entry) : `Ziel ${targetText(item.exercise)}`)}</div></div>
           <div class="side">›</div></li>`)
       .join("");
@@ -647,6 +756,7 @@ class GymTrackerPanel extends HTMLElement {
         <button class="btn slim" data-action="home">Pause</button></div>
       <h1>Übersicht</h1>
       <div class="card"><ul class="list">${rows}</ul></div>
+      <button class="btn" data-action="ex-add-session">+ Übung hinzufügen</button>
       <div class="actions stack">
         <div class="small muted" style="text-align:center">${done} erfasst · ${s.summary.skipped} übersprungen · ${open} offen</div>
         <button class="btn primary big" data-action="finish" ${done ? "" : "disabled"}>Training beenden</button>
@@ -677,7 +787,7 @@ class GymTrackerPanel extends HTMLElement {
     const s = this._summary;
     const rows = s.items
       .filter((i) => i.entry)
-      .map((i) => `<li>${this._stateIcon(i.entry)}<div class="grow"><div class="title">${esc(i.exercise.name)}</div>
+      .map((i) => `<li>${this._stateIcon(i.entry)}<div class="grow"><div class="title">${esc(i.exercise.name)}${this._badges(i)}</div>
           <div class="small muted">${esc(entryText(i.entry))}</div></div></li>`)
       .join("");
     return `<h1>Training abgeschlossen 💪</h1>
@@ -745,12 +855,13 @@ class GymTrackerPanel extends HTMLElement {
   }
 
   _renderExerciseStats() {
-    const exercises = this._ov.plans.flatMap((p) => p.exercises);
+    const exercises = this._ov.plans.flatMap((p) => p.exercises.concat(p.archived_exercises.filter((e) => e.entry_count)));
     const select = `<select data-change="exercise" aria-label="Übung">${exercises
-      .map((e) => `<option value="${e.id}" ${e.id === this._exerciseId ? "selected" : ""}>${esc(e.name)}</option>`)
+      .map((e) => `<option value="${e.id}" ${e.id === this._exerciseId ? "selected" : ""}>${esc(e.name)}${e.archived ? " (archiviert)" : ""}</option>`)
       .join("")}</select>`;
-    const head = `<h2>Pro Übung</h2><div style="margin-bottom:12px">${select}</div>`;
     const data = this._exStats;
+    const note = data?.exercise.archived ? `<div class="hint">Diese Übung ist archiviert und nicht mehr Teil des Plans.</div>` : "";
+    const head = `<h2>Pro Übung</h2><div style="margin-bottom:12px">${select}${note}</div>`;
     if (!data) return head;
     const { exercise: ex, points, records } = data;
     const timed = ex.duration_s !== null;
@@ -868,7 +979,7 @@ class GymTrackerPanel extends HTMLElement {
         const { exercise: ex, entry } = item;
         const text = entry ? entryText(entry) : "Nicht erfasst";
         return `<li>${this._stateIcon(entry)}
-          <div class="grow"><div class="title">${esc(ex.name)}</div>
+          <div class="grow"><div class="title">${esc(ex.name)}${this._badges(item)}</div>
           <div class="small muted">${esc(text)}${entry?.note ? ` · ${esc(entry.note)}` : ""}</div></div>
           <button class="btn slim" data-action="edit-entry" data-ex="${ex.id}" ${entry ? 'aria-label="Eintrag bearbeiten"' : ""}>${entry ? "✎" : "Nachtragen"}</button>
           ${entry ? `<button class="btn slim danger" data-action="delete-entry" data-id="${entry.id}" aria-label="Eintrag löschen">✕</button>` : ""}</li>`;
@@ -889,12 +1000,12 @@ class GymTrackerPanel extends HTMLElement {
 
   /* -------------------------------------------------------------- modal */
 
-  _stepper(field, label, value, unit, extra = "") {
+  _stepper(field, label, value, unit, extra = "", action = "form-step") {
     return `<div class="field"><div class="label"><span>${label}</span>${extra}</div>
       <div class="stepper">
-        <button data-action="form-step" data-field="${field}" data-dir="-1" aria-label="${label} verringern">−</button>
+        <button data-action="${action}" data-field="${field}" data-dir="-1" aria-label="${label} verringern">−</button>
         <div class="val">${value} <small>${unit}</small></div>
-        <button data-action="form-step" data-field="${field}" data-dir="1" aria-label="${label} erhöhen">+</button>
+        <button data-action="${action}" data-field="${field}" data-dir="1" aria-label="${label} erhöhen">+</button>
       </div></div>`;
   }
 
@@ -908,12 +1019,31 @@ class GymTrackerPanel extends HTMLElement {
         <button class="btn" data-action="confirm-no">Zurück</button></div></div>`;
       return;
     }
+    if (this._adopt) {
+      const a = this._adopt;
+      const rows = a.items
+        .map((item) => `<li><div class="grow"><div class="title">${esc(item.name)}</div></div>
+          <div class="yesno">${[["yes", "Ja"], ["no", "Nein"]].map(([v, label]) => `<button class="chip ${a.choice[item.id] === v ? "active" : ""}" data-action="adopt-set" data-id="${item.id}" data-v="${v}">${label}</button>`).join("")}</div></li>`)
+        .join("");
+      const ready = a.items.every((item) => a.choice[item.id]);
+      host.innerHTML = `<div class="modal"><div class="sheet stack">
+        <h2>In den Plan übernehmen?</h2>
+        <div class="muted">Ja: Die Übung wird Teil des Plans. Nein: Sie wird archiviert, der Eintrag bleibt in Verlauf und Auswertung.</div>
+        <ul class="list">${rows}</ul>
+        <button class="btn primary big" data-action="adopt-finish" ${ready ? "" : "disabled"}>Training beenden</button>
+        <button class="btn" data-action="adopt-cancel">Zurück</button></div></div>`;
+      return;
+    }
+    if (this._exForm) {
+      host.innerHTML = this._renderExForm();
+      return;
+    }
     const f = this._form;
     if (!f) {
       host.innerHTML = "";
       return;
     }
-    const steps = `<span class="steps">${WEIGHT_STEPS.map((s) => `<button class="chip ${this._step === s ? "active" : ""}" data-action="weight-step" data-step="${s}">${num(s, 1)} kg</button>`).join("")}</span>`;
+    const steps = this._weightSteps();
     host.innerHTML = `<div class="modal"><div class="sheet">
       <h2>${esc(f.name)}</h2>
       <div class="muted">Ziel ${esc(f.target)}</div>
@@ -930,6 +1060,92 @@ class GymTrackerPanel extends HTMLElement {
         <button class="btn primary big" data-action="form-save" ${f.rpe ? "" : "disabled"}>${f.rpe ? "Speichern" : "Bitte Intensität wählen"}</button>
         <button class="btn" data-action="form-cancel">Abbrechen</button>
       </div></div></div>`;
+  }
+
+  _weightSteps() {
+    return `<span class="steps">${WEIGHT_STEPS.map((s) => `<button class="chip ${this._step === s ? "active" : ""}" data-action="weight-step" data-step="${s}">${num(s, 1)} kg</button>`).join("")}</span>`;
+  }
+
+  _suggestions() {
+    const f = this._exForm;
+    const text = f.name.trim().toLocaleLowerCase(LOCALE);
+    if (f.mode === "edit" || text.length < 2) return "";
+    const what = f.mode === "session" ? "in dieses Training übernehmen" : "wiederherstellen";
+    return this._ov.plans[0].archived_exercises
+      .filter((e) => e.name.toLocaleLowerCase(LOCALE).includes(text))
+      .slice(0, 4)
+      .map((e) => `<button data-action="ex-suggest" data-id="${e.id}">Archiviert: „${esc(e.name)}“ (${esc(targetText(e))}) – ${what} ›</button>`)
+      .join("");
+  }
+
+  _renderExForm() {
+    const f = this._exForm;
+    const title = { add: "Übung hinzufügen", edit: "Übung bearbeiten", session: "Spontane Übung" }[f.mode];
+    const kinds = KINDS.map(([id, label, sub]) => `<button class="${f.kind === id ? "active" : ""}" data-action="ex-kind" data-kind="${id}" ${f.kindLocked ? "disabled" : ""}>${label}<small>${sub}</small></button>`).join("");
+    const st = (field, label, value, unit, extra = "") => this._stepper(field, label, value, unit, extra, "ex-step");
+    let fields = st("target_sets", "Sätze", f.target_sets, "");
+    if (f.kind === "time") fields += st("duration_s", "Dauer pro Satz", f.duration_s, "Sek.");
+    else fields += st("reps_min", "Wiederholungen von", f.reps_min, "Wdh.") + st("reps_max", "Wiederholungen bis", f.reps_max, "Wdh.");
+    if (f.kind === "weight") {
+      fields += st("start_weight", "Startgewicht", num(f.start_weight, 2), "kg", this._weightSteps());
+      if (f.lastWeight !== null && f.lastWeight !== undefined) {
+        fields += `<div class="hint">Gilt nur, solange noch kein Gewicht erfasst wurde – aktuell zählen ${esc(kg(f.lastWeight))} vom ${esc(shortDate(f.lastDate))}.</div>`;
+      }
+    }
+    const groups = [...new Set(this._ov.plans[0].exercises.map((e) => e.muscle_group).filter(Boolean))];
+    const chip = (label, active, attrs) => `<button class="chip ${active ? "active" : ""}" ${attrs}>${esc(label)}</button>`;
+    const more = f.more
+      ? `<div class="field"><div class="label"><span>Gruppe</span></div>
+          <div class="chips" style="margin-bottom:8px">
+            ${groups.map((g) => chip(g, !f.groupNew && f.group === g, `data-action="ex-group" data-group="${esc(g)}"`)).join("")}
+            ${chip("Ohne Gruppe", !f.groupNew && !f.group, `data-action="ex-group" data-group=""`)}
+            ${chip("Neue Gruppe …", f.groupNew, `data-action="ex-group-new"`)}
+          </div>
+          ${f.groupNew ? `<input type="text" data-input="ex-group-text" value="${esc(f.group)}" placeholder="Name der Gruppe" maxlength="60">` : ""}</div>
+        <div class="field"><div class="label"><span>Geräteeinstellung</span></div>
+          <input type="text" data-input="ex-setting" value="${esc(f.setting)}" placeholder="z. B. Sitz 6" maxlength="300"></div>
+        <div class="field"><div class="label"><span>Ausführungshinweis</span></div>
+          <textarea data-input="ex-hint" maxlength="1000" placeholder="Optional">${esc(f.hint)}</textarea></div>`
+      : "";
+    return `<div class="modal"><div class="sheet">
+      <h2>${title}</h2>
+      ${f.mode === "session" ? `<div class="muted">Wird sofort in diesem Training absolviert. Beim Beenden entscheidest du, ob sie in den Plan kommt.</div>` : ""}
+      <div class="field"><div class="label"><span>Name</span></div>
+        <input type="text" data-input="ex-name" value="${esc(f.name)}" placeholder="z. B. Wadenheben" maxlength="100" autocomplete="off">
+        <div class="suggest">${this._suggestions()}</div></div>
+      <div class="field"><div class="label"><span>Art</span></div><div class="kinds">${kinds}</div>
+        ${f.kindLocked ? `<div class="hint">Die Art ist nicht änderbar, weil es bereits Einträge zu dieser Übung gibt.</div>` : ""}</div>
+      ${fields}
+      <button class="toggle" data-action="ex-more">${f.more ? "▾" : "▸"} Weitere Angaben (Gruppe, Geräteeinstellung, Ausführung)</button>
+      ${more}
+      <div class="field stack">
+        <button class="btn primary big" data-action="ex-save">${f.mode === "session" ? "Hinzufügen und starten" : "Speichern"}</button>
+        <button class="btn" data-action="ex-cancel">Abbrechen</button>
+      </div></div></div>`;
+  }
+
+  _openExForm(mode, ex = null) {
+    const src = ex || NEW_EXERCISE;
+    this._exForm = {
+      mode,
+      id: ex?.id ?? null,
+      name: ex?.name ?? "",
+      kind: src.kind,
+      kindLocked: Boolean(ex?.entry_count),
+      target_sets: src.target_sets,
+      reps_min: src.reps_min ?? NEW_EXERCISE.reps_min,
+      reps_max: src.reps_max ?? NEW_EXERCISE.reps_max,
+      duration_s: src.duration_s ?? NEW_EXERCISE.duration_s,
+      start_weight: src.start_weight ?? NEW_EXERCISE.start_weight,
+      lastWeight: ex?.last_weight ?? null,
+      lastDate: ex?.last_date ?? null,
+      group: ex?.muscle_group ?? "",
+      groupNew: false,
+      setting: ex?.setting ?? "",
+      hint: ex?.hint ?? "",
+      more: Boolean(ex && (ex.setting || ex.hint)),
+    };
+    this._renderModal();
   }
 
   _openForm(session, item, context) {
@@ -974,6 +1190,16 @@ class GymTrackerPanel extends HTMLElement {
     const kind = ev.target.dataset?.input;
     if (kind === "form-note" && this._form) this._form.note = ev.target.value;
     if (kind === "session-note") this._noteDraft = ev.target.value;
+    const f = this._exForm;
+    if (!f || !kind?.startsWith("ex-")) return;
+    if (kind === "ex-name") {
+      f.name = ev.target.value;
+      // Only the suggestions are redrawn, so the text field keeps the focus.
+      this.shadowRoot.querySelector(".suggest").innerHTML = this._suggestions();
+    }
+    if (kind === "ex-group-text") f.group = ev.target.value;
+    if (kind === "ex-setting") f.setting = ev.target.value;
+    if (kind === "ex-hint") f.hint = ev.target.value;
   }
 
   _act_tab({ tab }) {
@@ -1126,29 +1352,198 @@ class GymTrackerPanel extends HTMLElement {
   }
 
   _act_confirm_yes() {
-    const run = this._confirm.run;
+    const { run, then } = this._confirm;
     this._confirm = null;
     this._renderModal();
-    this._run(run);
+    if (then) then();
+    else this._run(run);
+  }
+
+  _finish(adopt) {
+    this._run(async () => {
+      this._summary = await this._call("session/finish", { session_id: this._session.id, adopt });
+      this._session = null;
+      this._adopt = null;
+      this._show("summary");
+      this._ov = await this._call("overview");
+    });
+  }
+
+  /* Spontaneous exercises need a decision before the session ends. */
+  _askAdopt() {
+    const items = this._session.items.filter((i) => i.adhoc).map((i) => ({ id: i.exercise.id, name: i.exercise.name }));
+    if (!items.length) {
+      this._finish([]);
+      return;
+    }
+    this._adopt = { items, choice: {} };
+    this._renderModal();
   }
 
   _act_finish() {
-    const finish = async () => {
-      this._summary = await this._call("session/finish", { session_id: this._session.id });
-      this._session = null;
-      this._show("summary");
-      this._ov = await this._call("overview");
-    };
     const open = this._session.items.filter((i) => !i.entry).length;
-    if (!open) this._run(finish);
+    if (!open) this._askAdopt();
     else {
       this._ask({
         title: "Training beenden?",
         text: open === 1 ? "Eine Übung ist noch offen." : `${open} Übungen sind noch offen.`,
         yes: "Trotzdem beenden",
-        run: finish,
+        then: () => this._askAdopt(),
       });
     }
+  }
+
+  _act_adopt_set({ id, v }) {
+    this._adopt.choice[id] = v;
+    this._renderModal();
+  }
+
+  _act_adopt_cancel() {
+    this._adopt = null;
+    this._renderModal();
+  }
+
+  _act_adopt_finish() {
+    const a = this._adopt;
+    this._finish(a.items.filter((item) => a.choice[item.id] === "yes").map((item) => item.id));
+  }
+
+  /* ---------------------------------------------------- plan editing */
+
+  _act_plan() {
+    this._show("plan");
+  }
+
+  _planExercise(id) {
+    const plan = this._ov.plans[0];
+    return plan.exercises.concat(plan.archived_exercises).find((e) => e.id === Number(id));
+  }
+
+  /* Run a plan command; all of them answer with the updated plans. */
+  _planCall(type, data, message = "") {
+    this._run(async () => {
+      this._ov.plans = await this._call(type, data);
+      this._exForm = null;
+      this._render();
+      if (message) this._toast(message);
+    });
+  }
+
+  _act_ex_add() {
+    this._openExForm("add");
+  }
+
+  _act_ex_add_session() {
+    this._openExForm("session");
+  }
+
+  _act_ex_edit({ id }) {
+    this._openExForm("edit", this._planExercise(id));
+  }
+
+  _act_ex_move({ id, dir }) {
+    this._planCall("exercise/move", { exercise_id: Number(id), direction: dir });
+  }
+
+  _act_group_move({ group, dir }) {
+    this._planCall("exercise/move_group", { group, direction: dir });
+  }
+
+  _act_ex_archive({ id }) {
+    const ex = this._planExercise(id);
+    this._ask({
+      title: `„${ex.name}“ archivieren?`,
+      text: "Die Übung erscheint nicht mehr im Training. Verlauf und Auswertung bleiben erhalten, und sie lässt sich jederzeit wiederherstellen.",
+      yes: "Archivieren",
+      danger: true,
+      then: () => this._planCall("exercise/archive", { exercise_id: ex.id }, "Übung archiviert"),
+    });
+  }
+
+  _act_ex_restore({ id }) {
+    this._planCall("exercise/restore", { exercise_id: Number(id) }, "Übung wiederhergestellt");
+  }
+
+  _act_arch_toggle() {
+    this._archOpen = !this._archOpen;
+    this._render();
+  }
+
+  _act_ex_kind({ kind }) {
+    this._exForm.kind = kind;
+    this._renderModal();
+  }
+
+  _act_ex_step({ field, dir }) {
+    const f = this._exForm;
+    const step = { target_sets: 1, reps_min: 1, reps_max: 1, duration_s: 5, start_weight: this._step }[field];
+    const [low, high] = { target_sets: [1, 20], reps_min: [1, 999], reps_max: [1, 999], duration_s: [5, 3600], start_weight: [0.5, 1000] }[field];
+    f[field] = Math.max(low, Math.min(high, Math.round((f[field] + Number(dir) * step) * 100) / 100));
+    // Keep the range valid: moving one end past the other drags it along.
+    if (field === "reps_min" && f.reps_min > f.reps_max) f.reps_max = f.reps_min;
+    if (field === "reps_max" && f.reps_max < f.reps_min) f.reps_min = f.reps_max;
+    this._renderModal();
+  }
+
+  _act_ex_more() {
+    this._exForm.more = !this._exForm.more;
+    this._renderModal();
+  }
+
+  _act_ex_group({ group }) {
+    this._exForm.group = group;
+    this._exForm.groupNew = false;
+    this._renderModal();
+  }
+
+  _act_ex_group_new() {
+    this._exForm.group = "";
+    this._exForm.groupNew = true;
+    this._renderModal();
+    this.shadowRoot.querySelector('[data-input="ex-group-text"]')?.focus();
+  }
+
+  _act_ex_cancel() {
+    this._exForm = null;
+    this._renderModal();
+  }
+
+  /* A spontaneous exercise joins the running session and is opened right away. */
+  _addToSession(data) {
+    this._run(async () => {
+      const result = await this._call("session/add_exercise", { session_id: this._session.id, ...data });
+      this._session = result.session;
+      this._exForm = null;
+      this._show("exercise", this._session.items.findIndex((i) => i.exercise.id === result.exercise_id));
+      this._call("overview").then((ov) => (this._ov = ov)).catch(() => {});
+    });
+  }
+
+  _act_ex_suggest({ id }) {
+    if (this._exForm.mode === "session") this._addToSession({ exercise_id: Number(id) });
+    else this._planCall("exercise/restore", { exercise_id: Number(id) }, "Übung wiederhergestellt");
+  }
+
+  _act_ex_save() {
+    const f = this._exForm;
+    if (!f.name.trim()) {
+      this._toast(this._errorText({ code: "name_required" }), true);
+      return;
+    }
+    const data = {
+      name: f.name,
+      kind: f.kind,
+      target_sets: f.target_sets,
+      muscle_group: f.group,
+      setting: f.setting,
+      hint: f.hint,
+    };
+    if (f.kind === "time") data.duration_s = f.duration_s;
+    else Object.assign(data, { reps_min: f.reps_min, reps_max: f.reps_max });
+    if (f.kind === "weight") data.start_weight = f.start_weight;
+    if (f.mode === "session") this._addToSession(data);
+    else if (f.mode === "edit") this._planCall("exercise/update", { exercise_id: f.id, ...data }, "Gespeichert");
+    else this._planCall("exercise/add", data, "Übung hinzugefügt");
   }
 
   _act_cancel_session() {
