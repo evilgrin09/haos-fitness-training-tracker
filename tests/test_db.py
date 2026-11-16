@@ -130,7 +130,8 @@ def test_weight_of_running_session_does_not_change_its_own_default(db: GymDataba
 def test_editing_an_old_session_does_not_override_newer_weight(db: GymDatabase) -> None:
     first = _workout(db, START, {"Beinpresse": 65})
     _workout(db, START + timedelta(days=2), {"Beinpresse": 70})
-    db.save_entry(first, _exercise(db, "Beinpresse")["id"], START + timedelta(days=5), sets=3, reps=14, weight=80, rpe=9)
+    press = _exercise(db, "Beinpresse")["id"]
+    db.save_entry(first, press, START + timedelta(days=5), sets=3, reps=14, weight=80, rpe=9)
     third = db.start_session(None, START + timedelta(days=7), date(2026, 11, 9))
     assert _item(db, third, "Beinpresse")["defaults"]["weight"] == 70
 
