@@ -1369,9 +1369,9 @@ class GymTrackerPanel extends HTMLElement {
     });
   }
 
-  /* Spontaneous exercises need a decision before the session ends. */
+  /* Spontaneous exercises with an entry need a decision before the session ends; untouched ones are dropped. */
   _askAdopt() {
-    const items = this._session.items.filter((i) => i.adhoc).map((i) => ({ id: i.exercise.id, name: i.exercise.name }));
+    const items = this._session.items.filter((i) => i.adhoc && i.entry).map((i) => ({ id: i.exercise.id, name: i.exercise.name }));
     if (!items.length) {
       this._finish([]);
       return;

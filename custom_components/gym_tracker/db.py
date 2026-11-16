@@ -470,10 +470,22 @@ class GymDatabase:
             )
         return exercise_id
 
-    def _drop_unused_extras(self, session_id: int) -> list[int]:
-        """Ids of exercises created for this session only, to be removed with it if never recorded."""
+    def _created_extras(self, session_id: int) -> list[int]:
+        """Ids of the exercises that were newly created as spontaneous exercises of this session."""
         rows = self._all("SELECT exercise_id FROM session_extras WHERE session_id = ? AND created = 1", (session_id,))
         return [row["exercise_id"] for row in rows]
+
+    def _delete_unused(self, exercise_ids: list[int]) -> None:
+        """Remove spontaneous exercises that never got an entry and were not adopted into the plan.
+
+        Without this they would linger as archived exercises without any history.
+        """
+        for exercise_id in exercise_ids:
+            self._conn.execute(
+                "DELETE FROM exercises WHERE id = ? AND archived = 1"
+                " AND NOT EXISTS (SELECT 1 FROM entries WHERE exercise_id = ?)",
+                (exercise_id, exercise_id),
+            )
 
     @_locked
     def default_plan_id(self) -> int:
@@ -558,6 +570,7 @@ class GymDatabase:
             for row in extras:
                 if row["exercise_id"] in adopt:
                     self._restore(row["exercise_id"])
+            self._delete_unused(self._created_extras(session_id))
 
     @_locked
     def cancel_session(self, session_id: int, now: datetime) -> bool:
@@ -580,21 +593,17 @@ class GymDatabase:
             self._conn.execute(
                 "UPDATE sessions SET status = ?, ended_at = ? WHERE id = ?", (STATUS_CANCELLED, _iso(end), session_id)
             )
+            self._delete_unused(self._created_extras(session_id))
         return True
 
     @_locked
     def delete_session(self, session_id: int) -> None:
         """Delete a session including its entries."""
         self._session_row(session_id)
-        created = self._drop_unused_extras(session_id)
+        created = self._created_extras(session_id)
         with self._conn:
             self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-            for exercise_id in created:
-                self._conn.execute(
-                    "DELETE FROM exercises WHERE id = ? AND archived = 1"
-                    " AND NOT EXISTS (SELECT 1 FROM entries WHERE exercise_id = ?)",
-                    (exercise_id, exercise_id),
-                )
+            self._delete_unused(created)
 
     # ---------------------------------------------------------------- entries
 

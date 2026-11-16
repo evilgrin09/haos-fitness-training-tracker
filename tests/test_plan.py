@@ -414,6 +414,46 @@ def test_discarded_session_removes_unused_spontaneous_exercise(db: GymDatabase) 
     assert [e["name"] for e in _plan(db)["archived_exercises"]] == ["Wadenheben"]
 
 
+def test_finish_removes_new_spontaneous_exercise_without_entry(db: GymDatabase) -> None:
+    session_id, unused = _spontaneous(db)  # Wadenheben: added, never recorded
+    recorded = db.add_session_exercise(session_id, TIME)
+    db.save_entry(session_id, recorded, START + timedelta(minutes=10), sets=2, seconds=45, rpe=6)
+    db.finish_session(session_id, START + timedelta(minutes=30))
+    # The untouched one is gone, the recorded one stays archived with its entry.
+    assert [e["name"] for e in _plan(db)["archived_exercises"]] == ["Seitstütz"]
+    assert "Wadenheben" not in _names(db)
+    items = db.session_detail(session_id)["items"]
+    assert [i["exercise"]["name"] for i in items if i["adhoc"]] == ["Seitstütz"]
+    assert len(items) == 11
+    with _error("not_found"):
+        db.exercise_stats(unused, None)
+    db.add_exercise(None, WEIGHT)  # the name is free again
+    _assert_gapless(db)
+
+
+def test_finish_keeps_adopted_and_reused_exercises_without_entry(db: GymDatabase) -> None:
+    db.archive_exercise(_by_name(db, "Plank")["id"])
+    session_id, adopted = _spontaneous(db)
+    plank = db.add_session_exercise(session_id, exercise_id=_by_name(db, "Plank")["id"])
+    db.finish_session(session_id, START + timedelta(minutes=30), adopt=[adopted])
+    # Adopted explicitly: becomes a plan exercise even without an entry.
+    assert "Wadenheben" in _names(db)
+    # An exercise taken from the archive existed before and is never deleted.
+    assert [e["id"] for e in _plan(db)["archived_exercises"]] == [plank]
+
+
+def test_cancel_removes_new_spontaneous_exercise_without_entry(db: GymDatabase) -> None:
+    session_id, unused = _spontaneous(db)  # session has an entry for Beinpresse, so it is kept as cancelled
+    skipped = db.add_session_exercise(session_id, TIME)
+    db.save_entry(session_id, skipped, START + timedelta(minutes=5), skipped=True)
+    assert db.cancel_session(session_id, START + timedelta(minutes=10)) is True
+    # A skipped entry still is an entry (same rule as when deleting a session).
+    assert [e["name"] for e in _plan(db)["archived_exercises"]] == ["Seitstütz"]
+    assert [i["exercise"]["name"] for i in db.session_detail(session_id)["items"] if i["adhoc"]] == ["Seitstütz"]
+    with _error("not_found"):
+        db.exercise_stats(unused, None)
+
+
 def test_spontaneous_exercise_needs_running_session(db: GymDatabase) -> None:
     session_id = _record(db, START, "Beinpresse", sets=3, reps=14, weight=63)
     with _error("not_running"):
