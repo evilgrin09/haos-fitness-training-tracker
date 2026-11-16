@@ -1,0 +1,21 @@
+{
+  "domain": "gym_tracker",
+  "name": "Gym Tracker",
+  "codeowners": [
+    "@evilgrin09"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "frontend",
+    "http",
+    "panel_custom",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/evilgrin09/haos-fitness-training-tracker",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/evilgrin09/haos-fitness-training-tracker/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

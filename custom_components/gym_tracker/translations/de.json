@@ -1,0 +1,41 @@
+{
+  "config": {
+    "abort": {
+      "single_instance_allowed": "Gym Tracker ist bereits eingerichtet."
+    },
+    "step": {
+      "user": {
+        "title": "Gym Tracker",
+        "description": "Führt dich Übung für Übung durch dein Krafttraining und zeigt deine Entwicklung. Der Plan „Ganzkörper-Training“ wird automatisch angelegt.",
+        "data": {
+          "show_panel": "In der Seitenleiste anzeigen",
+          "panel_title": "Titel in der Seitenleiste"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Gym Tracker Optionen",
+        "data": {
+          "show_panel": "In der Seitenleiste anzeigen",
+          "panel_title": "Titel in der Seitenleiste"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_workout": {
+        "name": "Letztes Training"
+      },
+      "workouts_week": {
+        "name": "Trainings diese Woche"
+      },
+      "workouts_month": {
+        "name": "Trainings diesen Monat"
+      }
+    }
+  }
+}

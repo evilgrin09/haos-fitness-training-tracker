@@ -1,0 +1,41 @@
+{
+  "config": {
+    "abort": {
+      "single_instance_allowed": "Gym Tracker is already configured."
+    },
+    "step": {
+      "user": {
+        "title": "Gym Tracker",
+        "description": "Guides you through your strength training exercise by exercise and charts your progress. The plan \"Ganzkörper-Training\" is created automatically.",
+        "data": {
+          "show_panel": "Show in sidebar",
+          "panel_title": "Sidebar title"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Gym Tracker options",
+        "data": {
+          "show_panel": "Show in sidebar",
+          "panel_title": "Sidebar title"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_workout": {
+        "name": "Last workout"
+      },
+      "workouts_week": {
+        "name": "Workouts this week"
+      },
+      "workouts_month": {
+        "name": "Workouts this month"
+      }
+    }
+  }
+}

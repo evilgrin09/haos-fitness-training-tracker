@@ -1,0 +1,9 @@
+{
+  "entity": {
+    "sensor": {
+      "last_workout": { "default": "mdi:calendar-check" },
+      "workouts_week": { "default": "mdi:calendar-week" },
+      "workouts_month": { "default": "mdi:calendar-month" }
+    }
+  }
+}
