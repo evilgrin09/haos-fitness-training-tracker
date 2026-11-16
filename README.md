@@ -6,6 +6,17 @@ Wiederholungen, Gewicht und Intensität und zeigt die Entwicklung über Wochen u
 in Diagrammen. Gedacht für das Smartphone im Studio (HA Companion App), die Auswertung
 funktioniert genauso auf Tablet und Desktop.
 
+<p>
+  <img src="docs/images/start.png" width="24%" alt="Startbildschirm mit „Training starten“, Wochenstatistik und letzten Einheiten">
+  <img src="docs/images/uebung.png" width="24%" alt="Übungsbildschirm mit Ziel, Gewicht, Geräteeinstellung und Ausführungshinweis">
+  <img src="docs/images/eingabe.png" width="24%" alt="Eingabe von Sätzen, Wiederholungen, Gewicht und Intensität">
+  <img src="docs/images/uebersicht.png" width="24%" alt="Übersicht aller Übungen der laufenden Einheit">
+</p>
+
+![Auswertung auf dem Tablet: Trainings pro Woche, Gesamtvolumen, Intensität und Verlauf pro Übung](docs/images/auswertung.png)
+
+Die Screenshots zeigen Beispieldaten.
+
 ## Funktionen
 
 - **Geführtes Training**: Warm-up, dann pro Übung ein Bildschirm mit Ziel, aktuellem Gewicht,
@@ -26,6 +37,11 @@ funktioniert genauso auf Tablet und Desktop.
 - **Sensoren** fürs Dashboard: letztes Training, Trainings diese Woche, Trainings diesen Monat.
 - Oberfläche auf Deutsch, Hell-/Dunkelmodus folgt dem Home-Assistant-Theme, keine
   CDN-Abhängigkeiten.
+
+## Voraussetzungen
+
+- Home Assistant 2025.11 oder neuer
+- [HACS](https://hacs.xyz), wenn die Installation als benutzerdefiniertes Repository erfolgen soll
 
 ## Installation über HACS
 
@@ -106,3 +122,11 @@ Das Datenmodell ist darauf vorbereitet, gebaut ist davon noch nichts:
 - Steigerungsvorschlag, wenn die Wiederholungsspanne bei niedriger Intensität geschafft wurde
 - Offline-Erfassung im Studio mit späterer Synchronisierung
 - Wiederholungen je Satz einzeln erfassen (die Datenbank speichert bereits eine Zeile pro Satz)
+
+## Probleme und Wünsche
+
+Fehler und Ideen bitte als [Issue](https://github.com/evilgrin09/haos-fitness-training-tracker/issues) melden.
+
+## Lizenz
+
+[MIT](LICENSE)
