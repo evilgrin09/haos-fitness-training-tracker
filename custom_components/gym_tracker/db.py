@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from functools import wraps
+import json
 import logging
 from pathlib import Path
 import sqlite3
@@ -117,6 +118,18 @@ MIGRATIONS: tuple[str, ...] = (
     );
     CREATE INDEX idx_cardio_session ON cardio_entries(session_id);
     """,
+    # 5: progression suggestions, determined when a session starts, and what the user decided
+    """
+    CREATE TABLE recommendations (
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+        rule TEXT NOT NULL,
+        data TEXT NOT NULL,
+        decision TEXT CHECK (decision IN ('accepted', 'declined')),
+        decided_at TEXT,
+        PRIMARY KEY (session_id, exercise_id)
+    );
+    """,
 )
 
 # Release that wrote a schema version; names the backup taken before migrating away from it.
@@ -130,7 +143,7 @@ KINDS = (KIND_WEIGHT, KIND_REPS, KIND_TIME)
 
 POINT_KEYS = (
     "session_id", "date", "rpe", "set_count", "reps", "seconds", "avg_reps",
-    "max_reps", "max_seconds", "weight", "volume",
+    "max_reps", "max_seconds", "min_reps", "min_seconds", "weight", "volume",
 )  # fmt: skip
 
 
@@ -582,6 +595,10 @@ class GymDatabase:
                 "INSERT OR IGNORE INTO session_extras (session_id, exercise_id, created) VALUES (?, ?, ?)",
                 (session_id, exercise_id, created),
             )
+            if not created:
+                self._store_recommendation(
+                    session_id, self._exercise_by_id(exercise_id), date.fromisoformat(session["local_date"])
+                )
         return exercise_id
 
     def _created_extras(self, session_id: int) -> list[int]:
@@ -645,8 +662,79 @@ class GymDatabase:
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (uuid4().hex, plan_id, user_id, _iso(now), local_date.isoformat(), STATUS_RUNNING),
             )
-        assert cur.lastrowid is not None
+            assert cur.lastrowid is not None
+            exercises = self._all("SELECT * FROM exercises WHERE plan_id = ? AND archived = 0", (plan_id,))
+            for exercise in exercises:
+                self._store_recommendation(cur.lastrowid, exercise, local_date)
         return cur.lastrowid
+
+    # ----------------------------------------------------------- progression
+
+    def _completed_history(self, exercise_id: int, before_session: int) -> list[dict[str, Any]]:
+        """Points of the completed sessions before the given one (skipped exercises left out), oldest first."""
+        session = self._one("SELECT started_at FROM sessions WHERE id = ?", (before_session,))
+        assert session is not None
+        rows = self._all(
+            "SELECT e.*, s.local_date AS date FROM entries e JOIN sessions s ON s.id = e.session_id"
+            " WHERE e.exercise_id = ? AND e.skipped = 0 AND s.status = ?"
+            " AND (s.started_at < ? OR (s.started_at = ? AND s.id < ?))"
+            " ORDER BY s.started_at, s.id",
+            (exercise_id, STATUS_COMPLETED, session["started_at"], session["started_at"], before_session),
+        )
+        return [{key: entry[key] for key in POINT_KEYS} for entry in map(self._entry, rows)]
+
+    def _store_recommendation(self, session_id: int, exercise: dict[str, Any], today: date) -> None:
+        """Determine the suggestion of an exercise for a session once, so it stays the same during it."""
+        suggestion = logic.recommend(
+            self._exercise(dict(exercise)), self._completed_history(exercise["id"], session_id), today
+        )
+        if suggestion:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO recommendations (session_id, exercise_id, rule, data) VALUES (?, ?, ?, ?)",
+                (session_id, exercise["id"], suggestion["rule"], json.dumps(suggestion["data"])),
+            )
+
+    def _recommendations(self, session_id: int) -> dict[int, dict[str, Any]]:
+        rows = self._all("SELECT * FROM recommendations WHERE session_id = ?", (session_id,))
+        return {
+            row["exercise_id"]: {
+                "rule": row["rule"],
+                "data": json.loads(row["data"]),
+                "decision": row["decision"],
+                "decided_at": row["decided_at"],
+            }
+            for row in rows
+        }
+
+    @_locked
+    def decide_recommendation(
+        self, user_id: str, session_id: int, exercise_id: int, decision: str, now: datetime
+    ) -> None:
+        """Accept or decline the suggestion of an exercise in the running session.
+
+        Accepting changes the prefill of this session only, except for "one set more",
+        which raises the target sets of the plan. Hints can only be dismissed (declined).
+        """
+        session = self._session_row(user_id, session_id)
+        if session["status"] != STATUS_RUNNING:
+            raise GymError("not_running", "Session is not running")
+        recommendation = self._recommendations(session_id).get(exercise_id)
+        if recommendation is None:
+            raise GymError("not_found", "No suggestion for this exercise")
+        if decision not in ("accepted", "declined") or (
+            decision == "accepted" and recommendation["rule"] in logic.HINT_RULES
+        ):
+            raise GymError("invalid_values", "Invalid decision")
+        with self._conn:
+            self._conn.execute(
+                "UPDATE recommendations SET decision = ?, decided_at = ? WHERE session_id = ? AND exercise_id = ?",
+                (decision, _iso(now), session_id, exercise_id),
+            )
+            if decision == "accepted" and recommendation["rule"] == "sets":
+                self._conn.execute(
+                    "UPDATE exercises SET target_sets = ? WHERE id = ?",
+                    (recommendation["data"]["suggested_sets"], exercise_id),
+                )
 
     @_locked
     def set_warmup_done(self, user_id: str, session_id: int, done: bool) -> None:
@@ -783,8 +871,8 @@ class GymDatabase:
         else:
             if sets is None or not 1 <= sets <= 20:
                 raise GymError("invalid", "Number of sets must be between 1 and 20")
-            if rpe is not None and not 1 <= rpe <= 10:
-                raise GymError("invalid", "RPE must be between 1 and 10")
+            if rpe is None or not 1 <= rpe <= 10:
+                raise GymError("invalid", "RPE between 1 and 10 is required")
             amount = seconds if timed else reps
             if amount is None or not 0 <= amount <= 3600:
                 raise GymError("invalid", "Seconds are required" if timed else "Repetitions are required")
@@ -944,19 +1032,25 @@ class GymDatabase:
             row["exercise_id"]: self._entry(row)
             for row in self._all("SELECT * FROM entries WHERE session_id = ?", (session_id,))
         }
+        recommendations = self._recommendations(session_id)
         items = []
         changes = []
+        hints = []
         for exercise in map(self._exercise, exercises):
             previous = self._previous_entry(exercise["id"], session)
             entry = entries.get(exercise["id"])
             change = logic.weight_change(exercise, previous, entry)
             if change:
                 changes.append({"exercise_id": exercise["id"], "name": exercise["name"], **change})
+            recommendation = recommendations.get(exercise["id"])
+            if recommendation and recommendation["rule"] in ("recovery", "stall_push", "sets"):
+                hints.append({"exercise_id": exercise["id"], "name": exercise["name"], **recommendation})
             items.append(
                 {
                     "exercise": exercise,
                     "adhoc": exercise["id"] in extras,
-                    "defaults": logic.next_defaults(exercise, previous),
+                    "recommendation": recommendation,
+                    "defaults": logic.apply_recommendation(logic.next_defaults(exercise, previous), recommendation),
                     "previous": previous,
                     "entry": entry,
                     "weight_change": change,
@@ -980,6 +1074,7 @@ class GymDatabase:
             "total": len(items),
             "avg_rpe": round(sum(rpes) / len(rpes), 2) if rpes else None,
             "weight_changes": changes,
+            "stall_hints": hints,
         }
         return session
 
@@ -1067,15 +1162,32 @@ class GymDatabase:
         return points
 
     @_locked
-    def exercise_stats(self, user_id: str, exercise_id: int, since: date | None) -> dict[str, Any]:
-        """History of an exercise within a range plus all-time records."""
+    def exercise_stats(
+        self, user_id: str, exercise_id: int, since: date | None, today: date | None = None
+    ) -> dict[str, Any]:
+        """History of an exercise within a range plus all-time records and a possible stagnation."""
         exercise = self._exercise_row(user_id, exercise_id)
         history = self._exercise_history(exercise_id)
+        completed = [
+            {key: entry[key] for key in POINT_KEYS}
+            for entry in map(
+                self._entry,
+                self._all(
+                    "SELECT e.*, s.local_date AS date FROM entries e JOIN sessions s ON s.id = e.session_id"
+                    " WHERE e.exercise_id = ? AND e.skipped = 0 AND s.status = ? ORDER BY s.started_at, s.id",
+                    (exercise_id, STATUS_COMPLETED),
+                ),
+            )
+        ]
+        kind = exercise_kind(exercise)
+        stall = None
+        if len(completed) >= logic.PROGRESSION_MIN_SESSIONS:
+            stall = logic.stagnation(kind, completed, today or date.fromisoformat(completed[-1]["date"]))
         records = logic.find_records(history)
         points = [p for p in history if since is None or p["date"] >= since.isoformat()]
         for point in points:
             point["records"] = [name for name, rec in records.items() if rec["session_id"] == point["session_id"]]
-        return {"exercise": self._exercise(exercise), "points": points, "records": records}
+        return {"exercise": self._exercise(exercise), "points": points, "records": records, "stall": stall}
 
     @_locked
     def overview_stats(self, user_id: str, since: date | None, today: date) -> dict[str, Any]:

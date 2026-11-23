@@ -11,14 +11,14 @@ TIMED = {**BODYWEIGHT, "reps_min": None, "reps_max": None, "duration_s": 30}
 
 
 def test_defaults_first_training_use_plan_weight() -> None:
-    assert logic.next_defaults(WEIGHTED, None) == {"sets": 3, "reps": 14, "seconds": None, "weight": 63.0}
+    assert logic.next_defaults(WEIGHTED, None) == {"sets": 3, "reps": 12, "seconds": None, "weight": 63.0}
 
 
 def test_defaults_use_last_recorded_weight() -> None:
     previous = {"weight": 65.5, "reps": 12, "set_count": 2}
     defaults = logic.next_defaults(WEIGHTED, previous)
-    # Weight follows the last entry, sets and reps stay at the plan target.
-    assert defaults == {"sets": 3, "reps": 14, "seconds": None, "weight": 65.5}
+    # Weight and reps follow the last entry, the sets stay at the plan target.
+    assert defaults == {"sets": 3, "reps": 12, "seconds": None, "weight": 65.5}
 
 
 def test_defaults_lower_weight_is_taken_over_too() -> None:

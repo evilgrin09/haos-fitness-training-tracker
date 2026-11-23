@@ -79,7 +79,7 @@ async def test_full_workout_flow(hass: HomeAssistant, entry, hass_ws_client, fre
     assert session["warmup_done"] is True
 
     press, curl = session["items"][0], session["items"][1]
-    assert press["defaults"] == {"sets": 3, "reps": 14, "seconds": None, "weight": 63}
+    assert press["defaults"] == {"sets": 3, "reps": 12, "seconds": None, "weight": 63}
     freezer.tick(300)
     session = await _ws(
         client, "entry/save", session_id=session["id"], exercise_id=press["exercise"]["id"],
@@ -271,3 +271,33 @@ async def test_cardio_commands_and_sensor(hass: HomeAssistant, entry, hass_ws_cl
     assert _state(hass, entry, "cardio_week") == "15"
     text = await (await (await hass_client()).get(EXPORT_URL)).text()
     assert text.count(";Cardio;") == 2
+
+
+async def test_recommendation_decision(hass: HomeAssistant, entry, hass_ws_client, freezer) -> None:
+    client = await hass_ws_client(hass)
+    for day, reps in (("2026-11-09", 13), ("2026-11-10", 14)):
+        freezer.move_to(f"{day} 17:00:00+00:00")
+        session = await _ws(client, "session/start")
+        press = session["items"][0]["exercise"]["id"]
+        values = {"sets": 3, "reps": reps, "weight": 63, "rpe": 7}
+        await _ws(client, "entry/save", session_id=session["id"], exercise_id=press, **values)
+        await _ws(client, "session/finish", session_id=session["id"])
+    freezer.move_to("2026-11-11 17:00:00+00:00")
+    session = await _ws(client, "session/start")
+    item = session["items"][0]
+    assert item["recommendation"]["rule"] == "weight"
+    assert item["recommendation"]["data"]["suggested_weight"] == 65.5
+    session = await _ws(
+        client, "recommendation/decide", session_id=session["id"], exercise_id=press, decision="accepted"
+    )
+    assert session["items"][0]["defaults"] == {"sets": 3, "reps": 12, "seconds": None, "weight": 65.5}
+    await client.send_json_auto_id(
+        {"type": f"{DOMAIN}/recommendation/decide", "session_id": session["id"], "exercise_id": 999,
+         "decision": "declined"}
+    )
+    assert (await client.receive_json())["error"]["code"] == "not_found"
+    await client.send_json_auto_id(
+        {"type": f"{DOMAIN}/entry/save", "session_id": session["id"], "exercise_id": press, "sets": 3, "reps": 12,
+         "weight": 65.5}
+    )  # fmt: skip
+    assert not (await client.receive_json())["success"]  # RPE is required

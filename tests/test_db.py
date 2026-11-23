@@ -82,7 +82,8 @@ def test_first_training_uses_plan_weight(db: UserDB) -> None:
     session_id = db.start_session(None, START, START.date())
     item = _item(db, session_id, "Beinpresse")
     assert item["previous"] is None
-    assert item["defaults"] == {"sets": 3, "reps": 14, "seconds": None, "weight": 63}
+    # First training: start weight and the lower end of the repetition range.
+    assert item["defaults"] == {"sets": 3, "reps": 12, "seconds": None, "weight": 63}
     assert _item(db, session_id, "Plank")["defaults"] == {"sets": 3, "reps": None, "seconds": 30, "weight": None}
 
 

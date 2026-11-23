@@ -99,6 +99,40 @@ function relDay(iso, todayIso) {
   return `vor ${diff} Tagen`;
 }
 
+/* Friendly wording of a progression suggestion. Hints can only be dismissed. */
+const HINT_RULES = new Set(["recovery", "bodyweight", "stall_push"]);
+
+function recText(rec, ex) {
+  const d = rec.data;
+  const since = d.since ? ` seit dem ${shortDate(d.since)}` : "";
+  switch (rec.rule) {
+    case "weight":
+      return { title: `Heute ${kg(d.suggested_weight)} probieren?`, text: `Letztes Mal alle Sätze mit ${d.reps} Wdh. bei RPE ${d.rpe} – das sah nach Luft nach oben aus. Mit dem neuen Gewicht startest du wieder bei ${d.suggested_reps} Wdh.` };
+    case "weight_double":
+      return { title: `Heute ${kg(d.suggested_weight)} probieren?`, text: `Zweimal in Folge alle Sätze locker geschafft (RPE ${d.rpe}) – vielleicht passt heute ein größerer Schritt (+${num(d.step, 1)} kg). Wiederholungen starten wieder bei ${d.suggested_reps}.` };
+    case "reps":
+      return { title: "1–2 Wdh. mehr versuchen?", text: `Letztes Mal ${d.reps} Wdh. bei RPE ${d.rpe}. Vorbelegt würden ${d.suggested_reps} Wdh. pro Satz.` };
+    case "time":
+      return { title: `Heute ${d.suggested_seconds} Sek. probieren?`, text: `Die Zeit hast du letztes Mal bei RPE ${d.rpe} geschafft – vielleicht gehen heute 5 Sekunden mehr.` };
+    case "bodyweight":
+      return { title: "Mehr Wiederholungen als geplant", text: `Du schaffst mehr als ${d.reps_max} Wdh. – Zusatzgewicht oder eine langsamere Ausführung könnten die Übung wieder fordernder machen.` };
+    case "sets":
+      return { title: "Ab heute 3 Sätze?", text: `${d.sessions} Einheiten${since} ohne Steigerung, bei Ø RPE ${num(d.avg_rpe, 1)} gut machbar. Ein dritter Satz könnte neuen Schwung bringen. „Übernehmen“ ändert die Ziel-Sätze im Plan.` };
+    case "stall_push":
+      return { title: "Da geht vielleicht noch mehr", text: `${d.sessions} Einheiten${since} ohne Steigerung bei Ø RPE ${num(d.avg_rpe, 1)}. Etwas mehr Gewicht${ex?.duration_s ? " oder Zeit" : " oder Wiederholungen"} könnte passen.` };
+    case "recovery":
+      return { title: "Ausführung, Schlaf und Erholung prüfen", text: `${d.sessions} Einheiten${since} ohne Steigerung bei hoher Anstrengung (Ø RPE ${num(d.avg_rpe, 1)}). Steigern hat gerade keine Eile – achte auf saubere Ausführung, Schlaf und Erholung.` };
+    default:
+      return { title: "Vorschlag", text: "" };
+  }
+}
+
+function recDecision(rec) {
+  if (!rec) return "";
+  const decided = { accepted: "übernommen", declined: HINT_RULES.has(rec.rule) ? "ausgeblendet" : "abgelehnt" }[rec.decision];
+  return `Vorschlag: ${recText(rec).title} – ${decided || "nicht entschieden"}`;
+}
+
 function targetText(ex) {
   if (ex.duration_s !== null) return `${ex.target_sets} × ${ex.duration_s} Sek.`;
   const reps = ex.reps_min === ex.reps_max ? `${ex.reps_max}` : `${ex.reps_min}–${ex.reps_max}`;
@@ -402,6 +436,12 @@ select, input[type=text] { width: 100%; min-height: 48px; font: inherit; color: 
 .suggest button { display: block; width: 100%; text-align: left; margin-top: 6px; padding: 10px 12px; min-height: 44px;
   border-radius: 10px; border: 1px dashed var(--gt-primary); background: var(--gt-surface); color: var(--gt-text);
   font: inherit; font-size: 15px; cursor: pointer; }
+.rec { border-color: var(--gt-primary); border-width: 2px; }
+.rec h3 { color: var(--gt-primary); }
+.rec .title { font-size: 18px; font-weight: 500; margin-bottom: 4px; }
+.rec .row { margin-top: 12px; }
+.rec.hint { border-color: var(--gt-divider); border-width: 1px; }
+.rec.hint h3 { color: var(--gt-muted); }
 .toggle { background: none; border: 0; color: var(--gt-primary); font: inherit; font-weight: 500; padding: 10px 0;
   min-height: 44px; cursor: pointer; text-align: left; width: 100%; }
 textarea { width: 100%; min-height: 84px; font: inherit; color: var(--gt-text); background: var(--gt-surface);
@@ -867,6 +907,20 @@ class GymTrackerPanel extends HTMLElement {
         ${entry.skipped ? "" : `<div style="font-size:19px">${esc(entryText(entry))}</div>`}
         ${entry.note ? `<div class="small muted">${esc(entry.note)}</div>` : ""}</div>`;
     }
+    const rec = item.recommendation;
+    let recCard = "";
+    if (rec && !rec.decision && !entry) {
+      const { title, text } = recText(rec, ex);
+      const hint = HINT_RULES.has(rec.rule);
+      recCard = `<div class="card rec ${hint ? "hint" : ""}"><h3>${hint ? "Hinweis" : "Vorschlag"}</h3>
+        <div class="title">${esc(title)}</div><div class="small">${esc(text)}</div>
+        <div class="row">${hint
+          ? `<button class="btn slim" data-action="rec-decide" data-v="declined">Ausblenden</button>`
+          : `<button class="btn slim primary" data-action="rec-decide" data-v="accepted">Übernehmen</button>
+             <button class="btn slim" data-action="rec-decide" data-v="declined">Beibehalten</button>`}</div></div>`;
+    } else if (rec?.decision === "accepted" && !entry) {
+      recCard = `<div class="small muted" style="margin-bottom:12px">✓ Vorschlag übernommen: ${esc(recText(rec, ex).title.replace(/ probieren\?$|\?$/, ""))}</div>`;
+    }
     const last = previous
       ? `<div class="small muted" style="margin-bottom:12px">Zuletzt (${esc(shortDate(previous.date))}): ${esc(entryText(previous))}</div>`
       : `<div class="small muted" style="margin-bottom:12px">Erstes Training dieser Übung${ex.weighted ? " – Gewicht laut Plan" : ""}</div>`;
@@ -874,6 +928,7 @@ class GymTrackerPanel extends HTMLElement {
         <button class="btn slim" data-action="list">Übersicht</button></div>
       <div class="progress"><div style="width:${(recorded / items.length) * 100}%"></div></div>
       <h1>${esc(ex.name)}</h1>
+      ${recCard}
       <div class="facts">
         <div class="fact"><div class="label">Ziel</div><div class="value">${esc(targetText(ex))}</div></div>
         ${ex.weighted ? `<div class="fact"><div class="label">Gewicht</div><div class="value">${esc(kg(weight))}</div></div>` : ""}
@@ -949,6 +1004,17 @@ class GymTrackerPanel extends HTMLElement {
     </div>`;
   }
 
+  _stallHints(summary) {
+    if (!summary.stall_hints?.length) return "";
+    const rows = summary.stall_hints
+      .map((h) => {
+        const { title, text } = recText(h);
+        return `<li><div class="grow"><div class="title">${esc(h.name)}: ${esc(title)}</div><div class="small muted">${esc(text)}</div></div></li>`;
+      })
+      .join("");
+    return `<div class="card"><h3>Hinweise zur Entwicklung</h3><ul class="list">${rows}</ul></div>`;
+  }
+
   _cardioCard(session, editable) {
     const parts = ["warmup", "cooldown"].map((phase) => {
       const entries = session.cardio[phase];
@@ -972,6 +1038,7 @@ class GymTrackerPanel extends HTMLElement {
       <div class="muted" style="margin-bottom:12px">${esc(s.plan_name)} · ${esc(fmtDate(s.local_date))}</div>
       ${this._summaryTiles(s.summary)}
       ${this._changes(s.summary)}
+      ${this._stallHints(s.summary)}
       ${this._cardioCard(s, false)}
       ${rows ? `<div class="card"><h3>Übungen</h3><ul class="list">${rows}</ul></div>` : ""}
       <div class="actions"><button class="btn primary big" data-action="summary-done">Fertig</button></div>`;
@@ -1075,7 +1142,13 @@ class GymTrackerPanel extends HTMLElement {
       .map((e) => `<option value="${e.id}" ${e.id === this._exerciseId ? "selected" : ""}>${esc(e.name)}${e.archived ? " (archiviert)" : ""}</option>`)
       .join("")}</select>`;
     const data = this._exStats;
-    const note = data?.exercise.archived ? `<div class="hint">Diese Übung ist archiviert und nicht mehr Teil des Plans.</div>` : "";
+    let note = data?.exercise.archived ? `<div class="hint">Diese Übung ist archiviert und nicht mehr Teil des Plans.</div>` : "";
+    const stall = data?.stall;
+    if (stall && stall.avg_rpe !== null && (stall.avg_rpe >= 9 || stall.avg_rpe <= 7)) {
+      const rule = stall.avg_rpe >= 9 ? "recovery" : "stall_push";
+      const { title, text } = recText({ rule, data: stall }, data.exercise);
+      note += `<div class="card rec hint" style="margin-top:12px"><h3>Hinweis</h3><div class="title">${esc(title)}</div><div class="small">${esc(text)}</div></div>`;
+    }
     const head = `<h2>Pro Übung</h2><div style="margin-bottom:12px">${select}${note}</div>`;
     if (!data) return head;
     const { exercise: ex, points, records } = data;
@@ -1193,9 +1266,10 @@ class GymTrackerPanel extends HTMLElement {
       .map((item) => {
         const { exercise: ex, entry } = item;
         const text = entry ? entryText(entry) : "Nicht erfasst";
+        const decision = item.recommendation ? `<div class="small muted">💡 ${esc(recDecision(item.recommendation))}</div>` : "";
         return `<li>${this._stateIcon(entry)}
           <div class="grow"><div class="title">${esc(ex.name)}${this._badges(item)}</div>
-          <div class="small muted">${esc(text)}${entry?.note ? ` · ${esc(entry.note)}` : ""}</div></div>
+          <div class="small muted">${esc(text)}${entry?.note ? ` · ${esc(entry.note)}` : ""}</div>${decision}</div>
           <button class="btn slim" data-action="edit-entry" data-ex="${ex.id}" ${entry ? 'aria-label="Eintrag bearbeiten"' : ""}>${entry ? "✎" : "Nachtragen"}</button>
           ${entry ? `<button class="btn slim danger" data-action="delete-entry" data-id="${entry.id}" aria-label="Eintrag löschen">✕</button>` : ""}</li>`;
       })
@@ -1206,6 +1280,7 @@ class GymTrackerPanel extends HTMLElement {
       <div class="muted" style="margin-bottom:12px">${esc(s.plan_name)} · ${fmtTime(s.started_at)}${s.ended_at ? `–${fmtTime(s.ended_at)}` : ""} Uhr</div>
       ${this._summaryTiles(s.summary)}
       ${this._changes(s.summary)}
+      ${this._stallHints(s.summary)}
       <div class="card"><h3>Übungen</h3><ul class="list">${rows}</ul></div>
       ${this._cardioCard(s, true)}
       <div class="card"><h3>Notiz zur Einheit</h3>
@@ -1619,6 +1694,15 @@ class GymTrackerPanel extends HTMLElement {
   _act_next() {
     if (this._idx >= this._session.items.length - 1) this._afterLastExercise();
     else this._show("exercise", this._idx + 1);
+  }
+
+  _act_rec_decide({ v }) {
+    const item = this._session.items[this._idx];
+    this._run(async () => {
+      this._session = await this._call("recommendation/decide", { session_id: this._session.id, exercise_id: item.exercise.id, decision: v });
+      this._render();
+      if (v === "accepted") this._toast(item.recommendation.rule === "sets" ? "Plan auf 3 Sätze geändert" : "Vorbelegung angepasst");
+    });
   }
 
   _act_complete() {

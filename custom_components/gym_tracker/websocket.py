@@ -263,8 +263,30 @@ async def ws_stats_overview(hass: HomeAssistant, store: GymStore, msg: dict[str,
 @_command("stats/exercise", {vol.Required("exercise_id"): _ID, vol.Optional("range", default="3m"): _RANGE})
 async def ws_stats_exercise(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """History and records of an exercise."""
-    since = logic.range_start(msg["range"], dt_util.now().date())
-    return await store.async_read(lambda db: db.exercise_stats(uid, msg["exercise_id"], since))
+    today = dt_util.now().date()
+    since = logic.range_start(msg["range"], today)
+    return await store.async_read(lambda db: db.exercise_stats(uid, msg["exercise_id"], since, today))
+
+
+@_command(
+    "recommendation/decide",
+    {
+        vol.Required("session_id"): _ID,
+        vol.Required("exercise_id"): _ID,
+        vol.Required("decision"): vol.In(["accepted", "declined"]),
+    },
+)
+async def ws_recommendation_decide(
+    hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str
+) -> dict[str, Any]:
+    """Accept or decline the suggestion of an exercise in the running session."""
+    now = dt_util.utcnow()
+
+    def job(db: GymDatabase) -> dict[str, Any]:
+        db.decide_recommendation(uid, msg["session_id"], msg["exercise_id"], msg["decision"], now)
+        return db.session_detail(uid, msg["session_id"])
+
+    return await store.async_write(job)
 
 
 _DEVICE = vol.In(list(logic.CARDIO_DEVICES))
@@ -410,5 +432,6 @@ def async_register(hass: HomeAssistant) -> None:
         ws_cardio_add,
         ws_cardio_update,
         ws_cardio_delete,
+        ws_recommendation_decide,
     ):
         websocket_api.async_register_command(hass, command)

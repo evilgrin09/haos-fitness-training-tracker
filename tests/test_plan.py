@@ -210,7 +210,8 @@ def test_update_changes_values_but_not_past_entries(db: UserDB) -> None:
     # The weight recorded last still wins over the new start weight.
     new_session = db.start_session(None, START + timedelta(days=2), date(2026, 11, 4))
     defaults = db.session_detail(new_session)["items"][0]["defaults"]
-    assert defaults == {"sets": 4, "reps": 10, "seconds": None, "weight": 70}
+    # Sets follow the plan, reps and weight the values recorded last.
+    assert defaults == {"sets": 4, "reps": 14, "seconds": None, "weight": 70}
 
 
 def test_new_start_weight_applies_while_there_are_no_entries(db: UserDB) -> None:
@@ -330,7 +331,7 @@ def test_spontaneous_exercise_is_part_of_the_session_only(db: UserDB) -> None:
     assert len(detail["items"]) == 11
     item = detail["items"][-1]
     assert (item["exercise"]["id"], item["adhoc"], item["entry"]) == (exercise_id, True, None)
-    assert item["defaults"] == {"sets": 3, "reps": 14, "seconds": None, "weight": 40}
+    assert item["defaults"] == {"sets": 3, "reps": 12, "seconds": None, "weight": 40}
     assert [i["adhoc"] for i in detail["items"][:-1]] == [False] * 10
     # Not part of the plan yet.
     assert "Wadenheben" not in _names(db)
