@@ -1,4 +1,8 @@
-"""WebSocket API used by the Gym Tracker panel."""
+"""WebSocket API used by the Gym Tracker panel.
+
+Every command works on the data of the Home Assistant user of the connection only;
+ids of other users' data are answered with "not_found".
+"""
 
 from __future__ import annotations
 
@@ -39,11 +43,11 @@ EXERCISE_SCHEMA = {
 }
 EXERCISE_FIELDS = tuple(str(key) for key in EXERCISE_SCHEMA)
 
-Handler = Callable[[HomeAssistant, GymStore, dict[str, Any]], Awaitable[Any]]
+Handler = Callable[[HomeAssistant, GymStore, dict[str, Any], str], Awaitable[Any]]
 
 
 def _handler(func: Handler) -> Callable[..., Awaitable[None]]:
-    """Wrap a handler so that validation errors become websocket errors."""
+    """Wrap a handler: check access, pass the user id, turn validation errors into websocket errors."""
 
     @wraps(func)
     async def wrapper(
@@ -53,8 +57,12 @@ def _handler(func: Handler) -> Callable[..., Awaitable[None]]:
         if store is None or store.db is None:
             connection.send_error(msg["id"], "not_loaded", "Gym Tracker is not set up")
             return
+        user = connection.user
+        if user is None or not store.allowed(user.id):
+            connection.send_error(msg["id"], "no_access", "This user may not use Gym Tracker")
+            return
         try:
-            result = await func(hass, store, msg)
+            result = await func(hass, store, msg, user.id)
         except GymError as err:
             connection.send_error(msg["id"], err.code, str(err))
             return
@@ -73,81 +81,118 @@ def _command(name: str, schema: dict[Any, Any] | None = None) -> Callable[[Handl
 
 
 @_command("overview")
-async def ws_overview(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_overview(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """Everything the start screen needs."""
     today = dt_util.now().date()
+    await store.async_retry_assignment()
 
     def job(db: GymDatabase) -> dict[str, Any]:
-        running = db.running_session_id()
+        running = db.running_session_id(uid)
         return {
-            "plans": db.get_plans(),
-            "active_session": db.session_detail(running) if running else None,
-            "recent_sessions": db.list_sessions(limit=5),
-            "summary": db.summary(today),
+            "plans": db.get_plans(uid),
+            "active_session": db.session_detail(uid, running) if running else None,
+            "recent_sessions": db.list_sessions(uid, limit=5),
+            "summary": db.summary(uid, today),
             "today": today.isoformat(),
         }
 
-    return await store.async_read(job)
+    result = await store.async_read(job)
+    user = await hass.auth.async_get_user(uid)
+    result["user"] = {"id": uid, "name": user.name if user else "", "is_admin": bool(user and user.is_admin)}
+    # Data from before 0.3.0 that belongs to nobody yet: everybody gets a hint, admins the numbers.
+    result["unassigned"] = (
+        dict(store.unassigned) if store.unassigned and user and user.is_admin else bool(store.unassigned)
+    )
+    return result
+
+
+@_command(
+    "plan/create",
+    {
+        vol.Optional("template", default=False): cv.boolean,
+        vol.Optional("name"): _OPT_STR,
+        vol.Optional("freq_min"): vol.Any(None, vol.Coerce(int)),
+        vol.Optional("freq_max"): vol.Any(None, vol.Coerce(int)),
+    },
+)
+async def ws_plan_create(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> list[dict[str, Any]]:
+    """Create the plan of the user: a copy of the template or an empty plan."""
+    now = dt_util.utcnow()
+
+    def job(db: GymDatabase) -> list[dict[str, Any]]:
+        db.create_user_plan(
+            uid,
+            now,
+            template=msg["template"],
+            name=msg.get("name"),
+            freq_min=msg.get("freq_min"),
+            freq_max=msg.get("freq_max"),
+        )
+        return db.get_plans(uid)
+
+    return await store.async_write(job)
 
 
 @_command("session/start", {vol.Optional("plan_id"): _ID})
-async def ws_session_start(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_session_start(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """Start a session (or return the running one)."""
     now, today = dt_util.utcnow(), dt_util.now().date()
-    return await store.async_write(lambda db: db.session_detail(db.start_session(msg.get("plan_id"), now, today)))
+    return await store.async_write(
+        lambda db: db.session_detail(uid, db.start_session(uid, msg.get("plan_id"), now, today))
+    )
 
 
 @_command("session/get", {vol.Required("session_id"): _ID})
-async def ws_session_get(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_session_get(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """Return a session with all entries."""
-    return await store.async_read(lambda db: db.session_detail(msg["session_id"]))
+    return await store.async_read(lambda db: db.session_detail(uid, msg["session_id"]))
 
 
 @_command("session/warmup", {vol.Required("session_id"): _ID, vol.Required("done"): cv.boolean})
-async def ws_session_warmup(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_session_warmup(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """Tick off the warm-up."""
 
     def job(db: GymDatabase) -> dict[str, Any]:
-        db.set_warmup_done(msg["session_id"], msg["done"])
-        return db.session_detail(msg["session_id"])
+        db.set_warmup_done(uid, msg["session_id"], msg["done"])
+        return db.session_detail(uid, msg["session_id"])
 
     return await store.async_write(job)
 
 
 @_command("session/update", {vol.Required("session_id"): _ID, vol.Required("note"): cv.string})
-async def ws_session_update(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_session_update(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """Change the note of a session."""
 
     def job(db: GymDatabase) -> dict[str, Any]:
-        db.update_session(msg["session_id"], msg["note"].strip())
-        return db.session_detail(msg["session_id"])
+        db.update_session(uid, msg["session_id"], msg["note"].strip())
+        return db.session_detail(uid, msg["session_id"])
 
     return await store.async_write(job)
 
 
 @_command("session/finish", {vol.Required("session_id"): _ID, vol.Optional("adopt", default=list): [_ID]})
-async def ws_session_finish(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_session_finish(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """Complete the running session."""
     now = dt_util.utcnow()
 
     def job(db: GymDatabase) -> dict[str, Any]:
-        db.finish_session(msg["session_id"], now, msg["adopt"])
-        return db.session_detail(msg["session_id"])
+        db.finish_session(uid, msg["session_id"], now, msg["adopt"])
+        return db.session_detail(uid, msg["session_id"])
 
     return await store.async_write(job)
 
 
 @_command("session/cancel", {vol.Required("session_id"): _ID})
-async def ws_session_cancel(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_session_cancel(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """Cancel the running session."""
     now = dt_util.utcnow()
-    return {"kept": await store.async_write(lambda db: db.cancel_session(msg["session_id"], now))}
+    return {"kept": await store.async_write(lambda db: db.cancel_session(uid, msg["session_id"], now))}
 
 
 @_command("session/delete", {vol.Required("session_id"): _ID})
-async def ws_session_delete(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> None:
+async def ws_session_delete(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> None:
     """Delete a session."""
-    await store.async_write(lambda db: db.delete_session(msg["session_id"]))
+    await store.async_write(lambda db: db.delete_session(uid, msg["session_id"]))
 
 
 @_command(
@@ -165,12 +210,13 @@ async def ws_session_delete(hass: HomeAssistant, store: GymStore, msg: dict[str,
         vol.Optional("uuid"): cv.string,
     },
 )
-async def ws_entry_save(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_entry_save(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """Record (or correct) an exercise of a session."""
     now = dt_util.utcnow()
 
     def job(db: GymDatabase) -> dict[str, Any]:
         db.save_entry(
+            uid,
             msg["session_id"],
             msg["exercise_id"],
             now,
@@ -183,15 +229,15 @@ async def ws_entry_save(hass: HomeAssistant, store: GymStore, msg: dict[str, Any
             note=msg["note"].strip(),
             entry_uuid=msg.get("uuid"),
         )
-        return db.session_detail(msg["session_id"])
+        return db.session_detail(uid, msg["session_id"])
 
     return await store.async_write(job)
 
 
 @_command("entry/delete", {vol.Required("entry_id"): _ID})
-async def ws_entry_delete(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_entry_delete(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """Delete an entry."""
-    return await store.async_write(lambda db: db.session_detail(db.delete_entry(msg["entry_id"])))
+    return await store.async_write(lambda db: db.session_detail(uid, db.delete_entry(uid, msg["entry_id"])))
 
 
 @_command(
@@ -201,37 +247,39 @@ async def ws_entry_delete(hass: HomeAssistant, store: GymStore, msg: dict[str, A
         vol.Optional("offset", default=0): vol.All(vol.Coerce(int), vol.Range(min=0)),
     },
 )
-async def ws_sessions(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> list[dict[str, Any]]:
+async def ws_sessions(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> list[dict[str, Any]]:
     """Past sessions, newest first."""
-    return await store.async_read(lambda db: db.list_sessions(limit=msg["limit"], offset=msg["offset"]))
+    return await store.async_read(lambda db: db.list_sessions(uid, limit=msg["limit"], offset=msg["offset"]))
 
 
 @_command("stats/overview", {vol.Optional("range", default="3m"): _RANGE})
-async def ws_stats_overview(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_stats_overview(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """Overall figures of a range."""
     today = dt_util.now().date()
     since = logic.range_start(msg["range"], today)
-    return await store.async_read(lambda db: db.overview_stats(since, today))
+    return await store.async_read(lambda db: db.overview_stats(uid, since, today))
 
 
 @_command("stats/exercise", {vol.Required("exercise_id"): _ID, vol.Optional("range", default="3m"): _RANGE})
-async def ws_stats_exercise(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_stats_exercise(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
     """History and records of an exercise."""
     since = logic.range_start(msg["range"], dt_util.now().date())
-    return await store.async_read(lambda db: db.exercise_stats(msg["exercise_id"], since))
+    return await store.async_read(lambda db: db.exercise_stats(uid, msg["exercise_id"], since))
 
 
 def _exercise_data(msg: dict[str, Any]) -> dict[str, Any]:
     return {key: msg.get(key) for key in EXERCISE_FIELDS}
 
 
-def _plan_command(name: str, schema: dict[Any, Any], change: Callable[[GymDatabase, dict[str, Any]], Any]) -> Any:
-    """Command that changes the plan and returns all plans afterwards."""
+def _plan_command(
+    name: str, schema: dict[Any, Any], change: Callable[[GymDatabase, dict[str, Any], str], Any]
+) -> Any:
+    """Command that changes the plan and returns the user's plans afterwards."""
 
-    async def handler(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> list[dict[str, Any]]:
+    async def handler(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> list[dict[str, Any]]:
         def job(db: GymDatabase) -> list[dict[str, Any]]:
-            change(db, msg)
-            return db.get_plans()
+            change(db, msg, uid)
+            return db.get_plans(uid)
 
         return await store.async_write(job)
 
@@ -241,28 +289,32 @@ def _plan_command(name: str, schema: dict[Any, Any], change: Callable[[GymDataba
 ws_exercise_add = _plan_command(
     "exercise/add",
     {vol.Optional("plan_id"): _ID, **EXERCISE_SCHEMA},
-    lambda db, msg: db.add_exercise(msg.get("plan_id"), _exercise_data(msg)),
+    lambda db, msg, uid: db.add_exercise(uid, msg.get("plan_id"), _exercise_data(msg)),
 )
 ws_exercise_update = _plan_command(
     "exercise/update",
     {vol.Required("exercise_id"): _ID, **EXERCISE_SCHEMA},
-    lambda db, msg: db.update_exercise(msg["exercise_id"], _exercise_data(msg)),
+    lambda db, msg, uid: db.update_exercise(uid, msg["exercise_id"], _exercise_data(msg)),
 )
 ws_exercise_move = _plan_command(
     "exercise/move",
     {vol.Required("exercise_id"): _ID, vol.Required("direction"): _DIRECTION},
-    lambda db, msg: db.move_exercise(msg["exercise_id"], msg["direction"]),
+    lambda db, msg, uid: db.move_exercise(uid, msg["exercise_id"], msg["direction"]),
 )
 ws_group_move = _plan_command(
     "exercise/move_group",
     {vol.Optional("plan_id"): _ID, vol.Required("group"): cv.string, vol.Required("direction"): _DIRECTION},
-    lambda db, msg: db.move_group(msg.get("plan_id"), msg["group"], msg["direction"]),
+    lambda db, msg, uid: db.move_group(uid, msg.get("plan_id"), msg["group"], msg["direction"]),
 )
 ws_exercise_archive = _plan_command(
-    "exercise/archive", {vol.Required("exercise_id"): _ID}, lambda db, msg: db.archive_exercise(msg["exercise_id"])
+    "exercise/archive",
+    {vol.Required("exercise_id"): _ID},
+    lambda db, msg, uid: db.archive_exercise(uid, msg["exercise_id"]),
 )
 ws_exercise_restore = _plan_command(
-    "exercise/restore", {vol.Required("exercise_id"): _ID}, lambda db, msg: db.restore_exercise(msg["exercise_id"])
+    "exercise/restore",
+    {vol.Required("exercise_id"): _ID},
+    lambda db, msg, uid: db.restore_exercise(uid, msg["exercise_id"]),
 )
 
 
@@ -274,14 +326,16 @@ ws_exercise_restore = _plan_command(
         **{vol.Optional(str(key)): value for key, value in EXERCISE_SCHEMA.items()},
     },
 )
-async def ws_session_add_exercise(hass: HomeAssistant, store: GymStore, msg: dict[str, Any]) -> dict[str, Any]:
+async def ws_session_add_exercise(
+    hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str
+) -> dict[str, Any]:
     """Add a spontaneous exercise (new, or an archived one) to the running session."""
 
     def job(db: GymDatabase) -> dict[str, Any]:
         exercise_id = db.add_session_exercise(
-            msg["session_id"], None if "exercise_id" in msg else _exercise_data(msg), msg.get("exercise_id")
+            uid, msg["session_id"], None if "exercise_id" in msg else _exercise_data(msg), msg.get("exercise_id")
         )
-        return {"exercise_id": exercise_id, "session": db.session_detail(msg["session_id"])}
+        return {"exercise_id": exercise_id, "session": db.session_detail(uid, msg["session_id"])}
 
     return await store.async_write(job)
 
@@ -291,6 +345,7 @@ def async_register(hass: HomeAssistant) -> None:
     """Register all websocket commands."""
     for command in (
         ws_overview,
+        ws_plan_create,
         ws_session_start,
         ws_session_get,
         ws_session_warmup,
@@ -312,5 +367,3 @@ def async_register(hass: HomeAssistant) -> None:
         ws_session_add_exercise,
     ):
         websocket_api.async_register_command(hass, command)
-
-

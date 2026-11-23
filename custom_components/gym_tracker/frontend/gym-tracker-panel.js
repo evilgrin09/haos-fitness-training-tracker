@@ -227,6 +227,7 @@ const STYLE = `
 .toolbar { display: flex; align-items: center; height: 56px; padding: 0 4px; }
 .main-title { font-size: 20px; margin-left: 8px; flex: 1; }
 .tabs { display: flex; }
+.tabs[hidden] { display: none; }
 .tab { flex: 1; background: none; border: 0; border-bottom: 3px solid transparent; color: inherit; opacity: 0.75;
   font: inherit; font-size: 14px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em;
   padding: 12px 4px; cursor: pointer; }
@@ -499,6 +500,9 @@ class GymTrackerPanel extends HTMLElement {
       session_running: "Während eines laufenden Trainings ist der Plan gesperrt.",
       edge: "Weiter lässt sich das nicht verschieben.",
       archived: "Die Übung ist archiviert – bitte zuerst wiederherstellen.",
+      no_access: "Du bist für Gym Tracker nicht freigeschaltet.",
+      no_plan: "Bitte zuerst einen Plan anlegen.",
+      plan_exists: "Du hast bereits einen Plan.",
     };
     return known[err?.code] || err?.message || "Unbekannter Fehler";
   }
@@ -519,10 +523,18 @@ class GymTrackerPanel extends HTMLElement {
     try {
       overview = await this._call("overview");
     } catch (err) {
-      this._toast(this._errorText(err), true);
+      if (err?.code === "no_access") {
+        this._noAccess = true;
+        this._render();
+      } else this._toast(this._errorText(err), true);
       return;
     }
+    this._noAccess = false;
     if (epoch !== this._epoch || this._busy) return;
+    this._applyOverview(overview);
+  }
+
+  _applyOverview(overview) {
     this._ov = overview;
     this._session = this._ov.active_session;
     if (!this._session && ["warmup", "exercise", "list"].includes(this._view)) this._view = "home";
@@ -561,12 +573,58 @@ class GymTrackerPanel extends HTMLElement {
       .join("");
     this._charts = {};
     content.classList.toggle("wide", this._tab === "stats");
-    if (!this._ov) content.innerHTML = `<div class="empty">Lade …</div>`;
+    root.querySelector(".tabs").hidden = Boolean(this._noAccess || (this._ov && !this._ov.plans.length));
+    if (this._noAccess) content.innerHTML = this._renderNoAccess();
+    else if (!this._ov) content.innerHTML = `<div class="empty">Lade …</div>`;
+    else if (!this._ov.plans.length) content.innerHTML = this._renderCreatePlan();
     else if (this._tab === "training") content.innerHTML = this._renderTraining();
     else if (this._tab === "stats") content.innerHTML = this._renderStats();
     else content.innerHTML = this._detail ? this._renderDetail() : this._renderHistory();
     this._renderModal();
     this._drawCharts();
+  }
+
+  _renderNoAccess() {
+    return `<div class="card" style="margin-top:24px"><h3>Kein Zugriff</h3>
+      <div>Du bist für Gym Tracker nicht freigeschaltet. Ein Admin kann dich unter
+      Einstellungen → Geräte &amp; Dienste → Gym Tracker → Konfigurieren freischalten.</div></div>`;
+  }
+
+  /* Data from before 0.3.0 that nobody owns yet: a plain hint for everybody, details for admins. */
+  _unassignedHint() {
+    const u = this._ov.unassigned;
+    if (!u) return "";
+    if (u === true) {
+      return `<div class="card"><h3>Hinweis</h3><div>Es gibt Trainingsdaten aus einer früheren Version, die noch
+        niemandem zugeordnet sind. Wenn es deine sind, bitte einen Admin, sie dir zuzuordnen – lege dann noch keinen
+        eigenen Plan an.</div></div>`;
+    }
+    return `<div class="card"><h3>Bestehende Daten zuordnen</h3><div>${u.plans} Plan/Pläne und ${u.sessions} Einheit(en)
+      aus einer früheren Version sind noch keinem Benutzer zugeordnet. Zuordnen unter Einstellungen → Geräte &amp; Dienste
+      → Gym Tracker → Konfigurieren → „Bestehende Daten zuordnen an“. Zur Auswahl stehen nur Benutzer ohne eigenen
+      Plan.</div></div>`;
+  }
+
+  _renderCreatePlan() {
+    const f = this._planForm;
+    const empty = f
+      ? `<div class="card stack"><h3>Leerer Plan</h3>
+          <input type="text" data-input="plan-name" value="${esc(f.name)}" placeholder="Name des Plans" maxlength="100">
+          ${this._stepper("freq_min", "Ziel pro Woche: mindestens", f.freq_min, "×", "", "plan-step")}
+          ${this._stepper("freq_max", "Ziel pro Woche: höchstens", f.freq_max, "×", "", "plan-step")}
+          <button class="btn primary" data-action="plan-create-empty">Plan anlegen</button>
+          <button class="btn" data-action="plan-form-cancel">Abbrechen</button></div>`
+      : `<button class="btn" data-action="plan-form">Leeren Plan anlegen</button>
+         <div class="small muted" style="text-align:center">Name und Ziel pro Woche festlegen, Übungen danach selbst hinzufügen.</div>`;
+    return `<h1>Plan anlegen</h1>
+      <div class="muted" style="margin-bottom:16px">Hallo ${esc(this._ov.user?.name || "")}! Für dich gibt es noch keinen
+        Trainingsplan. Jeder Benutzer hat seinen eigenen Plan, seine eigenen Trainings und seine eigene Auswertung.</div>
+      ${this._unassignedHint()}
+      <div class="stack">
+        <button class="btn primary big" data-action="plan-template">Vorlage „Ganzkörper-Training“ übernehmen</button>
+        <div class="small muted" style="text-align:center">10 Übungen, 2–3× pro Woche – lässt sich danach anpassen.</div>
+        ${empty}
+      </div>`;
   }
 
   _renderTraining() {
@@ -623,6 +681,7 @@ class GymTrackerPanel extends HTMLElement {
       ? `<ul class="list">${recent.map((s) => this._sessionRow(s)).join("")}</ul>`
       : `<div class="empty">Noch kein Training absolviert.</div>`;
     return `${start}
+      ${this._ov.unassigned && this._ov.user?.is_admin ? this._unassignedHint() : ""}
       <div class="tiles">
         ${this._tile("Diese Woche", `${summary.week}<span class="muted" style="font-size:15px"> / ${goal}</span>`, "Trainings")}
         ${this._tile("Dieser Monat", summary.month, "Trainings")}
@@ -1190,6 +1249,7 @@ class GymTrackerPanel extends HTMLElement {
     const kind = ev.target.dataset?.input;
     if (kind === "form-note" && this._form) this._form.note = ev.target.value;
     if (kind === "session-note") this._noteDraft = ev.target.value;
+    if (kind === "plan-name" && this._planForm) this._planForm.name = ev.target.value;
     const f = this._exForm;
     if (!f || !kind?.startsWith("ex-")) return;
     if (kind === "ex-name") {
@@ -1406,6 +1466,50 @@ class GymTrackerPanel extends HTMLElement {
   _act_adopt_finish() {
     const a = this._adopt;
     this._finish(a.items.filter((item) => a.choice[item.id] === "yes").map((item) => item.id));
+  }
+
+  /* ---------------------------------------------------- plan creation */
+
+  _createPlan(data) {
+    this._run(async () => {
+      await this._call("plan/create", data);
+      this._planForm = null;
+      this._view = "home";
+      this._applyOverview(await this._call("overview"));
+      this._toast("Plan angelegt");
+    });
+  }
+
+  _act_plan_template() {
+    this._createPlan({ template: true });
+  }
+
+  _act_plan_form() {
+    this._planForm = { name: "", freq_min: 2, freq_max: 3 };
+    this._render();
+    this.shadowRoot.querySelector('[data-input="plan-name"]')?.focus();
+  }
+
+  _act_plan_form_cancel() {
+    this._planForm = null;
+    this._render();
+  }
+
+  _act_plan_step({ field, dir }) {
+    const f = this._planForm;
+    f[field] = Math.max(1, Math.min(14, f[field] + Number(dir)));
+    if (field === "freq_min" && f.freq_min > f.freq_max) f.freq_max = f.freq_min;
+    if (field === "freq_max" && f.freq_max < f.freq_min) f.freq_min = f.freq_max;
+    this._render();
+  }
+
+  _act_plan_create_empty() {
+    const f = this._planForm;
+    if (!f.name.trim()) {
+      this._toast("Bitte einen Namen für den Plan eingeben.", true);
+      return;
+    }
+    this._createPlan({ name: f.name, freq_min: f.freq_min, freq_max: f.freq_max });
   }
 
   /* ---------------------------------------------------- plan editing */

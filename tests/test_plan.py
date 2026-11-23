@@ -8,6 +8,8 @@ import pytest
 
 from custom_components.gym_tracker.db import MIGRATIONS, GymDatabase, GymError
 
+from .helpers import USER, UserDB
+
 START = datetime(2026, 11, 2, 17, 0, tzinfo=UTC)
 WEIGHT = {"name": "Wadenheben", "kind": "weight", "target_sets": 3, "reps_min": 12, "reps_max": 14, "start_weight": 40}
 REPS = {"name": "Klimmzüge", "kind": "reps", "target_sets": 3, "reps_min": 5, "reps_max": 8}
@@ -15,28 +17,28 @@ TIME = {"name": "Seitstütz", "kind": "time", "target_sets": 2, "duration_s": 45
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> GymDatabase:
-    """Database with the default plan."""
+def db(tmp_path: Path) -> UserDB:
+    """Database with the default plan of one user."""
     database = GymDatabase(tmp_path / "gym.db")
-    database.seed_default_plan(START)
-    yield database
+    database.create_user_plan(USER, START, template=True)
+    yield UserDB(database)
     database.close()
 
 
-def _plan(db: GymDatabase) -> dict:
+def _plan(db: UserDB) -> dict:
     return db.get_plans()[0]
 
 
-def _names(db: GymDatabase) -> list[str]:
+def _names(db: UserDB) -> list[str]:
     return [e["name"] for e in _plan(db)["exercises"]]
 
 
-def _by_name(db: GymDatabase, name: str) -> dict:
+def _by_name(db: UserDB, name: str) -> dict:
     plan = _plan(db)
     return next(e for e in plan["exercises"] + plan["archived_exercises"] if e["name"] == name)
 
 
-def _assert_gapless(db: GymDatabase) -> None:
+def _assert_gapless(db: UserDB) -> None:
     exercises = _plan(db)["exercises"]
     assert [e["position"] for e in exercises] == list(range(1, len(exercises) + 1))
     groups = [e["muscle_group"] for e in exercises]
@@ -44,7 +46,7 @@ def _assert_gapless(db: GymDatabase) -> None:
     assert len(seen) == len(set(seen)), "every group has to stay together"
 
 
-def _record(db: GymDatabase, when: datetime, name: str, **values) -> int:
+def _record(db: UserDB, when: datetime, name: str, **values) -> int:
     session_id = db.start_session(None, when, when.date())
     db.save_entry(session_id, _by_name(db, name)["id"], when + timedelta(minutes=5), rpe=7, **values)
     db.finish_session(session_id, when + timedelta(minutes=30))
@@ -58,7 +60,7 @@ def _error(code: str):
 # ------------------------------------------------------------------- adding
 
 
-def test_add_goes_to_end_of_its_group(db: GymDatabase) -> None:
+def test_add_goes_to_end_of_its_group(db: UserDB) -> None:
     exercise_id = db.add_exercise(None, {**WEIGHT, "muscle_group": "Beine & Rumpf", "setting": " Stufe 3 "})
     names = _names(db)
     assert names.index("Wadenheben") == 4  # after Plank, before the first upper-body exercise
@@ -72,7 +74,7 @@ def test_add_goes_to_end_of_its_group(db: GymDatabase) -> None:
     _assert_gapless(db)
 
 
-def test_add_without_group_goes_to_end_of_plan(db: GymDatabase) -> None:
+def test_add_without_group_goes_to_end_of_plan(db: UserDB) -> None:
     db.add_exercise(None, REPS)
     db.add_exercise(None, {**TIME, "muscle_group": "Mobilität"})
     names = _names(db)
@@ -84,7 +86,7 @@ def test_add_without_group_goes_to_end_of_plan(db: GymDatabase) -> None:
     _assert_gapless(db)
 
 
-def test_add_normalises_fields_of_other_kinds(db: GymDatabase) -> None:
+def test_add_normalises_fields_of_other_kinds(db: UserDB) -> None:
     db.add_exercise(None, {**TIME, "reps_min": 5, "reps_max": 8, "start_weight": 20})
     timed = _by_name(db, "Seitstütz")
     assert (timed["reps_min"], timed["start_weight"], timed["weighted"]) == (None, None, False)
@@ -105,13 +107,13 @@ def test_add_normalises_fields_of_other_kinds(db: GymDatabase) -> None:
         ({"kind": "time"}, "invalid_values"),
     ],
 )
-def test_add_validation(db: GymDatabase, change: dict, code: str) -> None:
+def test_add_validation(db: UserDB, change: dict, code: str) -> None:
     with _error(code):
         db.add_exercise(None, {**WEIGHT, **change})
     assert len(_names(db)) == 10
 
 
-def test_single_rep_number_is_allowed(db: GymDatabase) -> None:
+def test_single_rep_number_is_allowed(db: UserDB) -> None:
     db.add_exercise(None, {**REPS, "reps_min": 10, "reps_max": 10})
     assert _by_name(db, "Klimmzüge")["reps_min"] == 10
 
@@ -119,7 +121,7 @@ def test_single_rep_number_is_allowed(db: GymDatabase) -> None:
 # ---------------------------------------------------- archiving / restoring
 
 
-def test_archive_keeps_history_and_closes_gaps(db: GymDatabase) -> None:
+def test_archive_keeps_history_and_closes_gaps(db: UserDB) -> None:
     session_id = _record(db, START, "Beinbeuger (liegend)", sets=3, reps=14, weight=30)
     curl = _by_name(db, "Beinbeuger (liegend)")
     db.archive_exercise(curl["id"])
@@ -145,7 +147,7 @@ def test_archive_keeps_history_and_closes_gaps(db: GymDatabase) -> None:
     assert db.summary(date(2026, 11, 2))["total"] == 1
 
 
-def test_restore_goes_to_end_of_group_with_values_and_history(db: GymDatabase) -> None:
+def test_restore_goes_to_end_of_group_with_values_and_history(db: UserDB) -> None:
     _record(db, START, "Beinpresse", sets=3, reps=14, weight=70)
     press = _by_name(db, "Beinpresse")
     db.archive_exercise(press["id"])
@@ -162,7 +164,7 @@ def test_restore_goes_to_end_of_group_with_values_and_history(db: GymDatabase) -
     assert item["defaults"]["weight"] == 70
 
 
-def test_name_of_archived_exercise_suggests_restore_instead_of_duplicate(db: GymDatabase) -> None:
+def test_name_of_archived_exercise_suggests_restore_instead_of_duplicate(db: UserDB) -> None:
     press = _by_name(db, "Beinpresse")
     db.archive_exercise(press["id"])
     with _error("name_archived"):
@@ -174,7 +176,7 @@ def test_name_of_archived_exercise_suggests_restore_instead_of_duplicate(db: Gym
     assert _plan(db)["archived_exercises"] == []
 
 
-def test_restore_is_blocked_by_active_exercise_of_same_name(db: GymDatabase) -> None:
+def test_restore_is_blocked_by_active_exercise_of_same_name(db: UserDB) -> None:
     press = _by_name(db, "Beinpresse")
     db.archive_exercise(press["id"])
     db.update_exercise(_by_name(db, "Plank")["id"], {**TIME, "name": "Plank lang", "muscle_group": "Beine & Rumpf"})
@@ -191,7 +193,7 @@ def test_restore_is_blocked_by_active_exercise_of_same_name(db: GymDatabase) -> 
 # ------------------------------------------------------------------ editing
 
 
-def test_update_changes_values_but_not_past_entries(db: GymDatabase) -> None:
+def test_update_changes_values_but_not_past_entries(db: UserDB) -> None:
     session_id = _record(db, START, "Beinpresse", sets=3, reps=14, weight=70)
     press = _by_name(db, "Beinpresse")
     db.update_exercise(
@@ -211,7 +213,7 @@ def test_update_changes_values_but_not_past_entries(db: GymDatabase) -> None:
     assert defaults == {"sets": 4, "reps": 10, "seconds": None, "weight": 70}
 
 
-def test_new_start_weight_applies_while_there_are_no_entries(db: GymDatabase) -> None:
+def test_new_start_weight_applies_while_there_are_no_entries(db: UserDB) -> None:
     press = _by_name(db, "Beinpresse")
     data = {**WEIGHT, "name": "Beinpresse", "start_weight": 80, "muscle_group": "Beine & Rumpf"}
     db.update_exercise(press["id"], data)
@@ -219,7 +221,7 @@ def test_new_start_weight_applies_while_there_are_no_entries(db: GymDatabase) ->
     assert db.session_detail(session_id)["items"][0]["defaults"]["weight"] == 80
 
 
-def test_kind_is_locked_once_entries_exist(db: GymDatabase) -> None:
+def test_kind_is_locked_once_entries_exist(db: UserDB) -> None:
     plank = _by_name(db, "Plank")
     as_reps = {**REPS, "name": "Plank", "muscle_group": "Beine & Rumpf"}
     # Without entries the kind may change (a skipped entry does not count).
@@ -238,7 +240,7 @@ def test_kind_is_locked_once_entries_exist(db: GymDatabase) -> None:
     assert _by_name(db, "Plank")["target_sets"] == 4
 
 
-def test_update_validation_and_group_change(db: GymDatabase) -> None:
+def test_update_validation_and_group_change(db: UserDB) -> None:
     plank = _by_name(db, "Plank")
     with _error("name_exists"):
         db.update_exercise(plank["id"], {**TIME, "name": "Beinpresse"})
@@ -258,7 +260,7 @@ def test_update_validation_and_group_change(db: GymDatabase) -> None:
 # ------------------------------------------------------------------- moving
 
 
-def test_move_within_group(db: GymDatabase) -> None:
+def test_move_within_group(db: UserDB) -> None:
     press, curl = _by_name(db, "Beinpresse"), _by_name(db, "Beinbeuger (liegend)")
     db.move_exercise(press["id"], 1)
     assert _names(db)[:3] == ["Beinbeuger (liegend)", "Beinpresse", "Rückenstrecker"]
@@ -276,7 +278,7 @@ def test_move_within_group(db: GymDatabase) -> None:
         db.move_exercise(curl["id"], 1)
 
 
-def test_move_group(db: GymDatabase) -> None:
+def test_move_group(db: UserDB) -> None:
     db.add_exercise(None, REPS)  # without group, always last
     db.move_group(None, "Arme", -1)
     groups = [e["muscle_group"] for e in _plan(db)["exercises"]]
@@ -294,7 +296,7 @@ def test_move_group(db: GymDatabase) -> None:
         db.move_group(None, "Gibt es nicht", 1)
 
 
-def test_plan_is_locked_while_a_session_is_running(db: GymDatabase) -> None:
+def test_plan_is_locked_while_a_session_is_running(db: UserDB) -> None:
     press = _by_name(db, "Beinpresse")
     db.archive_exercise(_by_name(db, "Plank")["id"])
     session_id = db.start_session(None, START, START.date())
@@ -315,14 +317,14 @@ def test_plan_is_locked_while_a_session_is_running(db: GymDatabase) -> None:
 # ------------------------------------------------------ spontaneous exercise
 
 
-def _spontaneous(db: GymDatabase, data: dict = WEIGHT) -> tuple[int, int]:
+def _spontaneous(db: UserDB, data: dict = WEIGHT) -> tuple[int, int]:
     session_id = db.start_session(None, START, START.date())
     db.save_entry(session_id, _by_name(db, "Beinpresse")["id"], START, sets=3, reps=14, weight=63, rpe=7)
     exercise_id = db.add_session_exercise(session_id, {**data, "muscle_group": "Beine & Rumpf"})
     return session_id, exercise_id
 
 
-def test_spontaneous_exercise_is_part_of_the_session_only(db: GymDatabase) -> None:
+def test_spontaneous_exercise_is_part_of_the_session_only(db: UserDB) -> None:
     session_id, exercise_id = _spontaneous(db)
     detail = db.session_detail(session_id)
     assert len(detail["items"]) == 11
@@ -340,7 +342,7 @@ def test_spontaneous_exercise_is_part_of_the_session_only(db: GymDatabase) -> No
         db.add_session_exercise(session_id, {**WEIGHT, "name": "Neu", "target_sets": 0})
 
 
-def test_spontaneous_exercise_adopted_into_plan(db: GymDatabase) -> None:
+def test_spontaneous_exercise_adopted_into_plan(db: UserDB) -> None:
     session_id, exercise_id = _spontaneous(db)
     db.save_entry(session_id, exercise_id, START + timedelta(minutes=10), sets=3, reps=12, weight=42.5, rpe=8)
     db.finish_session(session_id, START + timedelta(minutes=30), adopt=[exercise_id])
@@ -359,7 +361,7 @@ def test_spontaneous_exercise_adopted_into_plan(db: GymDatabase) -> None:
     assert (item["adhoc"], item["defaults"]["weight"]) == (False, 42.5)
 
 
-def test_spontaneous_exercise_declined_stays_in_history(db: GymDatabase) -> None:
+def test_spontaneous_exercise_declined_stays_in_history(db: UserDB) -> None:
     session_id, exercise_id = _spontaneous(db, TIME)
     db.save_entry(session_id, exercise_id, START + timedelta(minutes=10), sets=2, seconds=50, rpe=6)
     db.finish_session(session_id, START + timedelta(minutes=30))
@@ -374,7 +376,7 @@ def test_spontaneous_exercise_declined_stays_in_history(db: GymDatabase) -> None
     assert len(db.session_detail(next_id)["items"]) == 10
 
 
-def test_archived_exercise_can_be_done_spontaneously(db: GymDatabase) -> None:
+def test_archived_exercise_can_be_done_spontaneously(db: UserDB) -> None:
     _record(db, START - timedelta(days=7), "Plank", sets=3, seconds=40)
     plank = _by_name(db, "Plank")
     db.archive_exercise(plank["id"])
@@ -391,7 +393,7 @@ def test_archived_exercise_can_be_done_spontaneously(db: GymDatabase) -> None:
     assert _by_name(db, "Plank")["entry_count"] == 2
 
 
-def test_cancelled_session_archives_spontaneous_exercise(db: GymDatabase) -> None:
+def test_cancelled_session_archives_spontaneous_exercise(db: UserDB) -> None:
     session_id, exercise_id = _spontaneous(db)
     db.save_entry(session_id, exercise_id, START, sets=3, reps=12, weight=40, rpe=7)
     assert db.cancel_session(session_id, START + timedelta(minutes=5))
@@ -400,7 +402,7 @@ def test_cancelled_session_archives_spontaneous_exercise(db: GymDatabase) -> Non
     assert db.session_detail(session_id)["items"][-1]["adhoc"] is True
 
 
-def test_discarded_session_removes_unused_spontaneous_exercise(db: GymDatabase) -> None:
+def test_discarded_session_removes_unused_spontaneous_exercise(db: UserDB) -> None:
     session_id = db.start_session(None, START, START.date())
     db.add_session_exercise(session_id, WEIGHT)
     assert db.cancel_session(session_id, START) is False
@@ -414,7 +416,7 @@ def test_discarded_session_removes_unused_spontaneous_exercise(db: GymDatabase) 
     assert [e["name"] for e in _plan(db)["archived_exercises"]] == ["Wadenheben"]
 
 
-def test_finish_removes_new_spontaneous_exercise_without_entry(db: GymDatabase) -> None:
+def test_finish_removes_new_spontaneous_exercise_without_entry(db: UserDB) -> None:
     session_id, unused = _spontaneous(db)  # Wadenheben: added, never recorded
     recorded = db.add_session_exercise(session_id, TIME)
     db.save_entry(session_id, recorded, START + timedelta(minutes=10), sets=2, seconds=45, rpe=6)
@@ -431,7 +433,7 @@ def test_finish_removes_new_spontaneous_exercise_without_entry(db: GymDatabase) 
     _assert_gapless(db)
 
 
-def test_finish_keeps_adopted_and_reused_exercises_without_entry(db: GymDatabase) -> None:
+def test_finish_keeps_adopted_and_reused_exercises_without_entry(db: UserDB) -> None:
     db.archive_exercise(_by_name(db, "Plank")["id"])
     session_id, adopted = _spontaneous(db)
     plank = db.add_session_exercise(session_id, exercise_id=_by_name(db, "Plank")["id"])
@@ -442,7 +444,7 @@ def test_finish_keeps_adopted_and_reused_exercises_without_entry(db: GymDatabase
     assert [e["id"] for e in _plan(db)["archived_exercises"]] == [plank]
 
 
-def test_cancel_removes_new_spontaneous_exercise_without_entry(db: GymDatabase) -> None:
+def test_cancel_removes_new_spontaneous_exercise_without_entry(db: UserDB) -> None:
     session_id, unused = _spontaneous(db)  # session has an entry for Beinpresse, so it is kept as cancelled
     skipped = db.add_session_exercise(session_id, TIME)
     db.save_entry(session_id, skipped, START + timedelta(minutes=5), skipped=True)
@@ -454,13 +456,13 @@ def test_cancel_removes_new_spontaneous_exercise_without_entry(db: GymDatabase) 
         db.exercise_stats(unused, None)
 
 
-def test_spontaneous_exercise_needs_running_session(db: GymDatabase) -> None:
+def test_spontaneous_exercise_needs_running_session(db: UserDB) -> None:
     session_id = _record(db, START, "Beinpresse", sets=3, reps=14, weight=63)
     with _error("not_running"):
         db.add_session_exercise(session_id, WEIGHT)
 
 
-def test_plan_changes_do_not_alter_statistics(db: GymDatabase) -> None:
+def test_plan_changes_do_not_alter_statistics(db: UserDB) -> None:
     _record(db, START, "Beinpresse", sets=3, reps=14, weight=63)
     _record(db, START + timedelta(days=2), "Plank", sets=3, seconds=30)
     today = date(2026, 11, 8)
@@ -496,9 +498,12 @@ def test_migration_of_existing_database(tmp_path: Path) -> None:
     )
     old.close()
 
-    db = GymDatabase(path)
-    assert db._conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS) == 2
-    assert not db.seed_default_plan(START)
+    raw = GymDatabase(path)
+    assert raw._conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+    assert raw.backup_path == Path(f"{path}.bak-0.1.0")
+    assert raw.unassigned() == {"plans": 1, "sessions": 1}
+    raw.assign_unassigned(USER)
+    db = UserDB(raw)
     plan = db.get_plans()[0]
     assert [e["name"] for e in plan["exercises"]] == ["Kniebeuge"]
     assert [e["name"] for e in plan["archived_exercises"]] == ["Alt-Übung"]
@@ -515,4 +520,6 @@ def test_migration_of_existing_database(tmp_path: Path) -> None:
     assert [e["name"] for e in db.get_plans()[0]["exercises"]] == ["Kniebeuge", "Seitstütz"]
     db.close()
     # Opening again does not migrate twice.
-    GymDatabase(path).close()
+    again = GymDatabase(path)
+    assert again.backup_path is None
+    again.close()

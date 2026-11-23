@@ -18,6 +18,22 @@ RANGE_DAYS: dict[str, int | None] = {"4w": 28, "3m": 91, "6m": 182, "1y": 365, "
 STALE_FINISH = timedelta(hours=2)
 
 
+def find_legacy_owner(users: list[dict[str, Any]], name: str) -> str | None:
+    """Id of the one user whose display name or user name equals ``name`` (case-insensitive).
+
+    Returns None if nobody or more than one user matches: the data is then left unassigned
+    instead of guessing.
+    """
+    key = name.casefold()
+    matches = {
+        user["id"]
+        for user in users
+        if (user.get("name") or "").casefold() == key
+        or any(username.casefold() == key for username in user.get("usernames", []))
+    }
+    return matches.pop() if len(matches) == 1 else None
+
+
 def range_start(key: str, today: date) -> date | None:
     """First day of the evaluation range, None for "all"."""
     days = RANGE_DAYS[key]

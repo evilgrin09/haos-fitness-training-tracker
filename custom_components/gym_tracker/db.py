@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from functools import wraps
+import logging
 from pathlib import Path
 import sqlite3
 import threading
@@ -17,6 +18,8 @@ from uuid import uuid4
 
 from . import logic
 from .seed import DEFAULT_PLAN
+
+_LOGGER = logging.getLogger(__name__)
 
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
@@ -93,7 +96,17 @@ MIGRATIONS: tuple[str, ...] = (
         PRIMARY KEY (session_id, exercise_id)
     );
     """,
+    # 3: every plan belongs to a Home Assistant user. NULL = data from before 0.3.0 that is
+    # not assigned yet; nobody can see it until it is assigned.
+    """
+    ALTER TABLE plans ADD COLUMN user_id TEXT;
+    CREATE INDEX idx_plans_user ON plans(user_id);
+    CREATE INDEX idx_sessions_user ON sessions(user_id, status);
+    """,
 )
+
+# Release that wrote a schema version; names the backup taken before migrating away from it.
+SCHEMA_RELEASES = {1: "0.1.0", 2: "0.2.1"}
 
 KIND_WEIGHT = "weight"
 KIND_REPS = "reps"
@@ -186,13 +199,33 @@ class GymDatabase:
     def __init__(self, path: str | Path) -> None:
         """Open (and create or migrate) the database."""
         self._lock = threading.RLock()
+        self.path = Path(path)
+        self.backup_path: Path | None = None
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._migrate()
 
+    def _backup(self, version: int) -> Path:
+        """Copy the database before its schema changes (consistent copy via the SQLite backup API)."""
+        base = f"{self.path}.bak-{SCHEMA_RELEASES.get(version, f'schema{version}')}"
+        target = Path(base)
+        counter = 1
+        while target.exists():
+            counter += 1
+            target = Path(f"{base}-{counter}")
+        copy = sqlite3.connect(str(target))
+        try:
+            self._conn.backup(copy)
+        finally:
+            copy.close()
+        _LOGGER.warning("Gym Tracker: Datenbank wird aktualisiert, Sicherung der bisherigen Daten: %s", target)
+        return target
+
     def _migrate(self) -> None:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if 0 < version < len(MIGRATIONS):
+            self.backup_path = self._backup(version)
         for number, script in enumerate(MIGRATIONS, start=1):
             if number > version:
                 self._conn.executescript(f"BEGIN;{script}PRAGMA user_version = {number};COMMIT;")
@@ -212,20 +245,35 @@ class GymDatabase:
     # ------------------------------------------------------------------ plans
 
     @_locked
-    def seed_default_plan(self, now: datetime) -> bool:
-        """Create the default plan if there is no plan yet."""
-        if self._one("SELECT id FROM plans LIMIT 1"):
-            return False
-        self.create_plan(DEFAULT_PLAN, now)
-        return True
+    def create_user_plan(
+        self,
+        user_id: str,
+        now: datetime,
+        *,
+        template: bool = False,
+        name: str | None = None,
+        freq_min: int | None = None,
+        freq_max: int | None = None,
+    ) -> int:
+        """Create the plan of a user: a copy of the bundled template or an empty plan."""
+        if self._one("SELECT id FROM plans WHERE user_id = ?", (user_id,)):
+            raise GymError("plan_exists", "The user already has a plan")
+        if template:
+            return self.create_plan(DEFAULT_PLAN, now, user_id)
+        name = " ".join(str(name or "").split())[:100]
+        if not name:
+            raise GymError("name_required", "The plan needs a name")
+        if not _int_between(freq_min, 1, 14) or not _int_between(freq_max, 1, 14) or freq_min > freq_max:
+            raise GymError("invalid_values", "Frequency must be between 1 and 14 and min <= max")
+        return self.create_plan({"name": name, "freq_min": freq_min, "freq_max": freq_max}, now, user_id)
 
     @_locked
-    def create_plan(self, plan: dict[str, Any], now: datetime) -> int:
+    def create_plan(self, plan: dict[str, Any], now: datetime, user_id: str | None) -> int:
         """Create a plan with its exercises."""
         with self._conn:
             cur = self._conn.execute(
-                "INSERT INTO plans (name, freq_min, freq_max, warmup, created_at) VALUES (?, ?, ?, ?, ?)",
-                (plan["name"], plan["freq_min"], plan["freq_max"], plan.get("warmup", ""), _iso(now)),
+                "INSERT INTO plans (name, freq_min, freq_max, warmup, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (plan["name"], plan["freq_min"], plan["freq_max"], plan.get("warmup", ""), _iso(now), user_id),
             )
             plan_id = cur.lastrowid
             for position, ex in enumerate(plan.get("exercises", []), start=1):
@@ -272,10 +320,46 @@ class GymDatabase:
         row["last_date"] = last["date"] if last else None
         return self._exercise(row)
 
+    # ------------------------------------------------------------- ownership
+
     @_locked
-    def get_plans(self) -> list[dict[str, Any]]:
-        """Return all plans with their active exercises (in training order) and the archived ones."""
-        plans = self._all("SELECT * FROM plans ORDER BY id")
+    def unassigned(self) -> dict[str, int]:
+        """Number of plans and sessions from before 0.3.0 that belong to nobody yet."""
+        plans = self._one("SELECT COUNT(*) AS n FROM plans WHERE user_id IS NULL")
+        sessions = self._one("SELECT COUNT(*) AS n FROM sessions WHERE user_id IS NULL")
+        assert plans is not None and sessions is not None
+        return {"plans": plans["n"], "sessions": sessions["n"]}
+
+    @_locked
+    def assign_unassigned(self, user_id: str) -> dict[str, int]:
+        """Hand all unassigned plans and sessions (with their exercises and entries) to a user."""
+        if self._one("SELECT id FROM plans WHERE user_id = ?", (user_id,)):
+            raise GymError("plan_exists", "The user already has an own plan")
+        counts = self.unassigned()
+        with self._conn:
+            self._conn.execute("UPDATE plans SET user_id = ? WHERE user_id IS NULL", (user_id,))
+            self._conn.execute("UPDATE sessions SET user_id = ? WHERE user_id IS NULL", (user_id,))
+        return counts
+
+    @_locked
+    def plan_users(self) -> list[str]:
+        """Users that have a plan."""
+        return [row["user_id"] for row in self._all("SELECT DISTINCT user_id FROM plans WHERE user_id IS NOT NULL")]
+
+    def _user_plan(self, user_id: str) -> dict[str, Any] | None:
+        return self._one("SELECT * FROM plans WHERE user_id = ? AND active = 1 ORDER BY id LIMIT 1", (user_id,))
+
+    def _owned_plan_id(self, user_id: str, plan_id: int | None) -> int:
+        if plan_id is None:
+            return self.default_plan_id(user_id)
+        if not self._one("SELECT id FROM plans WHERE id = ? AND user_id = ?", (plan_id, user_id)):
+            raise GymError("not_found", f"Plan {plan_id} not found")
+        return plan_id
+
+    @_locked
+    def get_plans(self, user_id: str) -> list[dict[str, Any]]:
+        """Return the plans of a user with their active exercises (in training order) and the archived ones."""
+        plans = self._all("SELECT * FROM plans WHERE user_id = ? ORDER BY id", (user_id,))
         for plan in plans:
             plan["active"] = bool(plan["active"])
             rows = self._all("SELECT * FROM exercises WHERE plan_id = ? ORDER BY position, id", (plan["id"],))
@@ -288,12 +372,22 @@ class GymDatabase:
 
     # ------------------------------------------------------------ plan editing
 
-    def _require_unlocked(self) -> None:
-        if self.running_session_id() is not None:
+    def _require_unlocked(self, user_id: str) -> None:
+        if self.running_session_id(user_id) is not None:
             raise GymError("session_running", "The plan cannot be changed while a session is running")
 
-    def _exercise_row(self, exercise_id: int) -> dict[str, Any]:
+    def _exercise_by_id(self, exercise_id: int) -> dict[str, Any]:
         row = self._one("SELECT * FROM exercises WHERE id = ?", (exercise_id,))
+        if row is None:
+            raise GymError("not_found", f"Exercise {exercise_id} not found")
+        return row
+
+    def _exercise_row(self, user_id: str, exercise_id: int) -> dict[str, Any]:
+        """An exercise of one of the user's plans; anything else counts as not found."""
+        row = self._one(
+            "SELECT x.* FROM exercises x JOIN plans p ON p.id = x.plan_id WHERE x.id = ? AND p.user_id = ?",
+            (exercise_id, user_id),
+        )
         if row is None:
             raise GymError("not_found", f"Exercise {exercise_id} not found")
         return row
@@ -345,7 +439,7 @@ class GymDatabase:
 
     def _restore(self, exercise_id: int) -> None:
         """Put an archived exercise back into the plan, at the end of its group."""
-        exercise = self._exercise_row(exercise_id)
+        exercise = self._exercise_by_id(exercise_id)
         if not exercise["archived"]:
             return
         self._check_name(exercise["plan_id"], exercise["name"], exclude_id=exercise_id, active_only=True)
@@ -356,11 +450,10 @@ class GymDatabase:
         self._write_order(self._grouped(exercise["plan_id"]))
 
     @_locked
-    def add_exercise(self, plan_id: int | None, data: dict[str, Any]) -> int:
+    def add_exercise(self, user_id: str, plan_id: int | None, data: dict[str, Any]) -> int:
         """Add an exercise at the end of its group (without group: at the end of the plan)."""
-        self._require_unlocked()
-        if plan_id is None:
-            plan_id = self.default_plan_id()
+        self._require_unlocked(user_id)
+        plan_id = self._owned_plan_id(user_id, plan_id)
         columns = normalize_exercise(data)
         self._check_name(plan_id, columns["name"])
         with self._conn:
@@ -369,10 +462,10 @@ class GymDatabase:
         return exercise_id
 
     @_locked
-    def update_exercise(self, exercise_id: int, data: dict[str, Any]) -> None:
+    def update_exercise(self, user_id: str, exercise_id: int, data: dict[str, Any]) -> None:
         """Change an exercise. Past entries stay untouched; the kind is fixed once entries exist."""
-        self._require_unlocked()
-        exercise = self._exercise_row(exercise_id)
+        self._require_unlocked(user_id)
+        exercise = self._exercise_row(user_id, exercise_id)
         if exercise["archived"]:
             raise GymError("archived", "Restore the exercise before changing it")
         columns = normalize_exercise(data)
@@ -391,10 +484,10 @@ class GymDatabase:
             self._write_order(self._grouped(exercise["plan_id"]))
 
     @_locked
-    def move_exercise(self, exercise_id: int, direction: int) -> None:
+    def move_exercise(self, user_id: str, exercise_id: int, direction: int) -> None:
         """Move an exercise one step up (-1) or down (+1) within its group."""
-        self._require_unlocked()
-        exercise = self._exercise_row(exercise_id)
+        self._require_unlocked(user_id)
+        exercise = self._exercise_row(user_id, exercise_id)
         groups = self._grouped(exercise["plan_id"])
         ids = next((ids for _group, ids in groups if exercise_id in ids), None)
         if ids is None:
@@ -408,11 +501,10 @@ class GymDatabase:
             self._write_order(groups)
 
     @_locked
-    def move_group(self, plan_id: int | None, group: str, direction: int) -> None:
+    def move_group(self, user_id: str, plan_id: int | None, group: str, direction: int) -> None:
         """Move a whole group one step up (-1) or down (+1)."""
-        self._require_unlocked()
-        if plan_id is None:
-            plan_id = self.default_plan_id()
+        self._require_unlocked(user_id)
+        plan_id = self._owned_plan_id(user_id, plan_id)
         groups = self._grouped(plan_id)
         names = [name for name, _ids in groups]
         if group not in names:
@@ -426,36 +518,37 @@ class GymDatabase:
             self._write_order(groups)
 
     @_locked
-    def archive_exercise(self, exercise_id: int) -> None:
+    def archive_exercise(self, user_id: str, exercise_id: int) -> None:
         """Take an exercise out of the plan. Its entries stay in history and statistics."""
-        self._require_unlocked()
-        exercise = self._exercise_row(exercise_id)
+        self._require_unlocked(user_id)
+        exercise = self._exercise_row(user_id, exercise_id)
         with self._conn:
             self._conn.execute("UPDATE exercises SET archived = 1 WHERE id = ?", (exercise_id,))
             self._write_order(self._grouped(exercise["plan_id"]))
 
     @_locked
-    def restore_exercise(self, exercise_id: int) -> None:
+    def restore_exercise(self, user_id: str, exercise_id: int) -> None:
         """Bring an archived exercise back, with its values and its history."""
-        self._require_unlocked()
+        self._require_unlocked(user_id)
+        self._exercise_row(user_id, exercise_id)
         with self._conn:
             self._restore(exercise_id)
 
     @_locked
     def add_session_exercise(
-        self, session_id: int, data: dict[str, Any] | None = None, exercise_id: int | None = None
+        self, user_id: str, session_id: int, data: dict[str, Any] | None = None, exercise_id: int | None = None
     ) -> int:
         """Add a spontaneous exercise to the running session.
 
         It stays outside the plan (archived) until the session is finished and
         the user decides to adopt it. An archived exercise can be reused.
         """
-        session = self._session_row(session_id)
+        session = self._session_row(user_id, session_id)
         if session["status"] != STATUS_RUNNING:
             raise GymError("not_running", "Session is not running")
         with self._conn:
             if exercise_id is not None:
-                exercise = self._exercise_row(exercise_id)
+                exercise = self._exercise_row(user_id, exercise_id)
                 if exercise["plan_id"] != session["plan_id"] or not exercise["archived"]:
                     raise GymError("name_exists", "The exercise is already part of the plan")
                 created = 0
@@ -488,20 +581,21 @@ class GymDatabase:
             )
 
     @_locked
-    def default_plan_id(self) -> int:
+    def default_plan_id(self, user_id: str) -> int:
         """Plan used when the panel starts a session without choosing one."""
-        row = self._one("SELECT id FROM plans WHERE active = 1 ORDER BY id LIMIT 1")
+        row = self._user_plan(user_id)
         if row is None:
             raise GymError("no_plan", "No training plan available")
         return row["id"]
 
     # --------------------------------------------------------------- sessions
 
-    def _session_row(self, session_id: int) -> dict[str, Any]:
+    def _session_row(self, user_id: str, session_id: int) -> dict[str, Any]:
+        """A session of the user; sessions of others count as not found."""
         row = self._one(
             "SELECT s.*, p.name AS plan_name, p.warmup AS warmup FROM sessions s"
-            " JOIN plans p ON p.id = s.plan_id WHERE s.id = ?",
-            (session_id,),
+            " JOIN plans p ON p.id = s.plan_id WHERE s.id = ? AND s.user_id = ?",
+            (session_id, user_id),
         )
         if row is None:
             raise GymError("not_found", f"Session {session_id} not found")
@@ -509,51 +603,54 @@ class GymDatabase:
         return row
 
     @_locked
-    def running_session_id(self) -> int | None:
-        """Id of the session in progress, if any."""
-        row = self._one("SELECT id FROM sessions WHERE status = ? ORDER BY id DESC LIMIT 1", (STATUS_RUNNING,))
+    def running_session_id(self, user_id: str) -> int | None:
+        """Id of the user's session in progress, if any."""
+        row = self._one(
+            "SELECT id FROM sessions WHERE status = ? AND user_id = ? ORDER BY id DESC LIMIT 1",
+            (STATUS_RUNNING, user_id),
+        )
         return row["id"] if row else None
 
     @_locked
-    def start_session(self, plan_id: int | None, now: datetime, local_date: date) -> int:
-        """Start a session; an already running one is returned instead."""
-        running = self.running_session_id()
+    def start_session(self, user_id: str, plan_id: int | None, now: datetime, local_date: date) -> int:
+        """Start a session; an already running one of the user is returned instead."""
+        running = self.running_session_id(user_id)
         if running is not None:
             return running
-        if plan_id is None:
-            plan_id = self.default_plan_id()
-        elif not self._one("SELECT id FROM plans WHERE id = ?", (plan_id,)):
-            raise GymError("not_found", f"Plan {plan_id} not found")
+        plan_id = self._owned_plan_id(user_id, plan_id)
         with self._conn:
             cur = self._conn.execute(
-                "INSERT INTO sessions (uuid, plan_id, started_at, local_date, status) VALUES (?, ?, ?, ?, ?)",
-                (uuid4().hex, plan_id, _iso(now), local_date.isoformat(), STATUS_RUNNING),
+                "INSERT INTO sessions (uuid, plan_id, user_id, started_at, local_date, status)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (uuid4().hex, plan_id, user_id, _iso(now), local_date.isoformat(), STATUS_RUNNING),
             )
         assert cur.lastrowid is not None
         return cur.lastrowid
 
     @_locked
-    def set_warmup_done(self, session_id: int, done: bool) -> None:
+    def set_warmup_done(self, user_id: str, session_id: int, done: bool) -> None:
         """Tick off the warm-up."""
-        self._session_row(session_id)
+        self._session_row(user_id, session_id)
         with self._conn:
             self._conn.execute("UPDATE sessions SET warmup_done = ? WHERE id = ?", (int(done), session_id))
 
     @_locked
-    def update_session(self, session_id: int, note: str) -> None:
+    def update_session(self, user_id: str, session_id: int, note: str) -> None:
         """Change the note of a session."""
-        self._session_row(session_id)
+        self._session_row(user_id, session_id)
         with self._conn:
             self._conn.execute("UPDATE sessions SET note = ? WHERE id = ?", (note, session_id))
 
     @_locked
-    def finish_session(self, session_id: int, now: datetime, adopt: tuple[int, ...] | list[int] = ()) -> None:
+    def finish_session(
+        self, user_id: str, session_id: int, now: datetime, adopt: tuple[int, ...] | list[int] = ()
+    ) -> None:
         """Mark a running session as completed.
 
         Spontaneous exercises listed in ``adopt`` become regular plan exercises,
         the others stay archived (their entries are kept).
         """
-        session = self._session_row(session_id)
+        session = self._session_row(user_id, session_id)
         if session["status"] != STATUS_RUNNING:
             raise GymError("not_running", "Session is not running")
         last = self._one(
@@ -573,12 +670,12 @@ class GymDatabase:
             self._delete_unused(self._created_extras(session_id))
 
     @_locked
-    def cancel_session(self, session_id: int, now: datetime) -> bool:
+    def cancel_session(self, user_id: str, session_id: int, now: datetime) -> bool:
         """Cancel a running session. Without any entry it is removed entirely.
 
         Returns True if the session still exists afterwards.
         """
-        session = self._session_row(session_id)
+        session = self._session_row(user_id, session_id)
         if session["status"] != STATUS_RUNNING:
             raise GymError("not_running", "Session is not running")
         last = self._one(
@@ -586,7 +683,7 @@ class GymDatabase:
         )
         assert last is not None
         if not last["n"]:
-            self.delete_session(session_id)
+            self.delete_session(user_id, session_id)
             return False
         end = logic.session_end(now, datetime.fromisoformat(last["last"]))
         with self._conn:
@@ -597,9 +694,9 @@ class GymDatabase:
         return True
 
     @_locked
-    def delete_session(self, session_id: int) -> None:
+    def delete_session(self, user_id: str, session_id: int) -> None:
         """Delete a session including its entries."""
-        self._session_row(session_id)
+        self._session_row(user_id, session_id)
         created = self._created_extras(session_id)
         with self._conn:
             self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
@@ -630,6 +727,7 @@ class GymDatabase:
     @_locked
     def save_entry(
         self,
+        user_id: str,
         session_id: int,
         exercise_id: int,
         now: datetime,
@@ -648,7 +746,7 @@ class GymDatabase:
         Saving is idempotent per (session, exercise), so a retried request
         never creates a duplicate.
         """
-        session = self._session_row(session_id)
+        session = self._session_row(user_id, session_id)
         exercise = self._one("SELECT * FROM exercises WHERE id = ?", (exercise_id,))
         if exercise is None or exercise["plan_id"] != session["plan_id"]:
             raise GymError("not_found", f"Exercise {exercise_id} not found in this plan")
@@ -699,9 +797,13 @@ class GymDatabase:
         return entry_id
 
     @_locked
-    def delete_entry(self, entry_id: int) -> int:
+    def delete_entry(self, user_id: str, entry_id: int) -> int:
         """Delete an entry and return the id of its session."""
-        row = self._one("SELECT session_id FROM entries WHERE id = ?", (entry_id,))
+        row = self._one(
+            "SELECT e.session_id FROM entries e JOIN sessions s ON s.id = e.session_id"
+            " WHERE e.id = ? AND s.user_id = ?",
+            (entry_id, user_id),
+        )
         if row is None:
             raise GymError("not_found", f"Entry {entry_id} not found")
         with self._conn:
@@ -711,9 +813,9 @@ class GymDatabase:
     # ---------------------------------------------------------------- queries
 
     @_locked
-    def session_detail(self, session_id: int) -> dict[str, Any]:
+    def session_detail(self, user_id: str, session_id: int) -> dict[str, Any]:
         """A session with one item per exercise: plan data, defaults, previous and current entry."""
-        session = self._session_row(session_id)
+        session = self._session_row(user_id, session_id)
         extras = [
             row["exercise_id"]
             for row in self._all(
@@ -771,6 +873,7 @@ class GymDatabase:
     @_locked
     def list_sessions(
         self,
+        user_id: str,
         *,
         since: date | None = None,
         statuses: tuple[str, ...] = (STATUS_COMPLETED, STATUS_CANCELLED),
@@ -787,9 +890,9 @@ class GymDatabase:
             " (SELECT COALESCE(SUM(t.reps * t.weight), 0) FROM entry_sets t JOIN entries e ON e.id = t.entry_id"
             "   WHERE e.session_id = s.id AND e.skipped = 0) AS volume"
             " FROM sessions s JOIN plans p ON p.id = s.plan_id"
-            f" WHERE s.status IN ({marks}) AND s.local_date >= ?"
+            f" WHERE s.user_id = ? AND s.status IN ({marks}) AND s.local_date >= ?"
             " ORDER BY s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
-            (*statuses, since.isoformat() if since else "", limit, offset),
+            (user_id, *statuses, since.isoformat() if since else "", limit, offset),
         )
         for row in rows:
             row["volume"] = round(row["volume"], 2)
@@ -801,21 +904,23 @@ class GymDatabase:
         return rows
 
     @_locked
-    def summary(self, today: date) -> dict[str, Any]:
-        """Figures for the sensors and the start screen (completed sessions only)."""
+    def summary(self, user_id: str, today: date) -> dict[str, Any]:
+        """Figures of a user for the sensors and the start screen (completed sessions only)."""
         week = logic.week_start(today)
         month = logic.month_start(today)
 
         def count(start: date | None = None) -> int:
             row = self._one(
-                "SELECT COUNT(*) AS n FROM sessions WHERE status = ? AND local_date >= ?",
-                (STATUS_COMPLETED, start.isoformat() if start else ""),
+                "SELECT COUNT(*) AS n FROM sessions WHERE user_id = ? AND status = ? AND local_date >= ?",
+                (user_id, STATUS_COMPLETED, start.isoformat() if start else ""),
             )
             assert row is not None
             return row["n"]
 
-        last = self._one("SELECT MAX(local_date) AS last FROM sessions WHERE status = ?", (STATUS_COMPLETED,))
-        plan = self._one("SELECT freq_min, freq_max FROM plans WHERE active = 1 ORDER BY id LIMIT 1")
+        last = self._one(
+            "SELECT MAX(local_date) AS last FROM sessions WHERE user_id = ? AND status = ?", (user_id, STATUS_COMPLETED)
+        )
+        plan = self._user_plan(user_id)
         return {
             "last_date": last["last"] if last else None,
             "week": count(week),
@@ -826,8 +931,7 @@ class GymDatabase:
             "freq_max": plan["freq_max"] if plan else None,
         }
 
-    @_locked
-    def exercise_history(self, exercise_id: int) -> list[dict[str, Any]]:
+    def _exercise_history(self, exercise_id: int) -> list[dict[str, Any]]:
         """One point per finished session in which the exercise was recorded, oldest first."""
         rows = self._all(
             "SELECT e.*, s.local_date AS date FROM entries e JOIN sessions s ON s.id = e.session_id"
@@ -842,12 +946,10 @@ class GymDatabase:
         return points
 
     @_locked
-    def exercise_stats(self, exercise_id: int, since: date | None) -> dict[str, Any]:
+    def exercise_stats(self, user_id: str, exercise_id: int, since: date | None) -> dict[str, Any]:
         """History of an exercise within a range plus all-time records."""
-        exercise = self._one("SELECT * FROM exercises WHERE id = ?", (exercise_id,))
-        if exercise is None:
-            raise GymError("not_found", f"Exercise {exercise_id} not found")
-        history = self.exercise_history(exercise_id)
+        exercise = self._exercise_row(user_id, exercise_id)
+        history = self._exercise_history(exercise_id)
         records = logic.find_records(history)
         points = [p for p in history if since is None or p["date"] >= since.isoformat()]
         for point in points:
@@ -855,15 +957,15 @@ class GymDatabase:
         return {"exercise": self._exercise(exercise), "points": points, "records": records}
 
     @_locked
-    def overview_stats(self, since: date | None, today: date) -> dict[str, Any]:
-        """Completed sessions of a range, grouped into weeks or months."""
-        sessions = list(reversed(self.list_sessions(since=since, statuses=(STATUS_COMPLETED,))))
+    def overview_stats(self, user_id: str, since: date | None, today: date) -> dict[str, Any]:
+        """Completed sessions of a user within a range, grouped into weeks or months."""
+        sessions = list(reversed(self.list_sessions(user_id, since=since, statuses=(STATUS_COMPLETED,))))
         start = since or (date.fromisoformat(sessions[0]["date"]) if sessions else today)
         granularity = logic.choose_granularity(start, today)
         rpes = [s["avg_rpe"] for s in sessions if s["avg_rpe"] is not None]
         durations = [s["duration_s"] for s in sessions if s["duration_s"] is not None]
         weeks = max(((today - start) + timedelta(days=1)).days / 7, 1)
-        plan = self._one("SELECT freq_min, freq_max FROM plans WHERE active = 1 ORDER BY id LIMIT 1")
+        plan = self._user_plan(user_id)
         return {
             "start": start.isoformat(),
             "end": today.isoformat(),
@@ -882,18 +984,20 @@ class GymDatabase:
         }
 
     @_locked
-    def export_rows(self) -> list[dict[str, Any]]:
-        """All data, one row per set (skipped exercises: one row without set)."""
+    def export_rows(self, user_id: str) -> list[dict[str, Any]]:
+        """All data of a user, one row per set (skipped exercises: one row without set)."""
         return self._all(
             "SELECT s.local_date AS date, s.started_at, s.ended_at, s.status, p.name AS plan,"
             " x.name AS exercise, x.muscle_group, t.set_no, t.reps, t.seconds, t.weight, e.rpe, e.skipped, e.note,"
             " x.archived"
             " FROM entries e JOIN sessions s ON s.id = e.session_id JOIN plans p ON p.id = s.plan_id"
             " JOIN exercises x ON x.id = e.exercise_id LEFT JOIN entry_sets t ON t.entry_id = e.id"
-            " ORDER BY s.started_at, s.id, x.position, t.set_no"
+            " WHERE s.user_id = ?"
+            " ORDER BY s.started_at, s.id, x.position, t.set_no",
+            (user_id,),
         )
 
     @_locked
-    def export_csv(self) -> str:
-        """All data as CSV text."""
-        return logic.build_csv(self.export_rows())
+    def export_csv(self, user_id: str) -> str:
+        """All data of a user as CSV text."""
+        return logic.build_csv(self.export_rows(user_id))

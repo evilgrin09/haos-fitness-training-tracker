@@ -66,7 +66,7 @@ async def _async_register_panel(hass: HomeAssistant, entry: ConfigEntry) -> None
 
 async def async_setup_entry(hass: HomeAssistant, entry: GymTrackerConfigEntry) -> bool:
     """Set up Gym Tracker from a config entry."""
-    store = GymStore(hass)
+    store = GymStore(hass, entry)
     await store.async_load()
     hass.data[DOMAIN] = store
     entry.runtime_data = store
@@ -85,8 +85,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: GymTrackerConfigEntry) -
     return True
 
 
-async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
+async def _async_update_listener(hass: HomeAssistant, entry: GymTrackerConfigEntry) -> None:
+    """Reload when the options change (not when the store records the owner of old data in entry.data)."""
+    if dict(entry.options) != entry.runtime_data.options:
+        await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: GymTrackerConfigEntry) -> bool:

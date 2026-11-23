@@ -6,10 +6,12 @@ from freezegun.api import FrozenDateTimeFactory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.gym_tracker.const import DB_FILE, DOMAIN, EXPORT_URL, PANEL_URL_PATH
+from custom_components.gym_tracker.store import GymStore
 
 
 @pytest.fixture(autouse=True)
@@ -19,8 +21,10 @@ def auto_enable_custom_integrations(enable_custom_integrations):
 
 
 @pytest.fixture
-async def entry(hass: HomeAssistant, freezer: FrozenDateTimeFactory, tmp_path: Path) -> MockConfigEntry:
-    """Set up the integration with a database in a temporary config directory."""
+async def entry(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory, tmp_path: Path, hass_admin_user
+) -> MockConfigEntry:
+    """Set up the integration in a temporary config directory; the admin user gets the template plan."""
     freezer.move_to("2026-11-11 17:00:00+00:00")  # a Wednesday
     await hass.config.async_set_time_zone("Europe/Berlin")
     hass.config.config_dir = str(tmp_path)
@@ -28,6 +32,9 @@ async def entry(hass: HomeAssistant, freezer: FrozenDateTimeFactory, tmp_path: P
     entry = MockConfigEntry(domain=DOMAIN, options={"show_panel": True, "panel_title": "Training"})
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    store: GymStore = hass.data[DOMAIN]
+    await store.async_write(lambda db: db.create_user_plan(hass_admin_user.id, dt_util.utcnow(), template=True))
     await hass.async_block_till_done()
     return entry
 
@@ -40,9 +47,13 @@ async def _ws(client, msg_type: str, **data):
 
 
 def _state(hass: HomeAssistant, entry: MockConfigEntry, key: str) -> str:
-    entity_id = er.async_get(hass).async_get_entity_id("sensor", DOMAIN, f"{entry.entry_id}_{key}")
-    assert entity_id
-    return hass.states.get(entity_id).state
+    """State of the sensor ``key`` of the only user with a plan."""
+    (entity,) = [
+        e
+        for e in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+        if e.unique_id.endswith(f"_{key}")
+    ]
+    return hass.states.get(entity.entity_id).state
 
 
 async def test_setup_creates_database_panel_and_sensors(hass: HomeAssistant, entry, tmp_path: Path) -> None:

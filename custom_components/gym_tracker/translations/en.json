@@ -18,9 +18,12 @@
     "step": {
       "init": {
         "title": "Gym Tracker options",
+        "description": "Allowed users: empty = every user may use the panel. Every user only sees their own plans and workouts.\n\nIf shown: {plans} plan(s) and {sessions} session(s) from before version 0.3.0 are not assigned to a user yet. Choose their owner under \"Assign existing data to\". Only users without an own plan are offered.",
         "data": {
           "show_panel": "Show in sidebar",
-          "panel_title": "Sidebar title"
+          "panel_title": "Sidebar title",
+          "allowed_users": "Allowed users",
+          "legacy_owner": "Assign existing data to"
         }
       }
     }

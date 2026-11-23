@@ -1,4 +1,4 @@
-"""Sensors of Gym Tracker."""
+"""Sensors of Gym Tracker: one device with its sensors per user with a plan."""
 
 from __future__ import annotations
 
@@ -63,24 +63,43 @@ SENSORS: tuple[GymSensorDescription, ...] = (
 async def async_setup_entry(
     hass: HomeAssistant, entry: GymTrackerConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
 ) -> None:
-    """Set up the sensors."""
-    async_add_entities(GymSensor(entry, description) for description in SENSORS)
+    """Set up the sensors; users who create a plan later get theirs added on the fly."""
+    store = entry.runtime_data
+    known: set[str] = set()
+
+    @callback
+    def add_new_users() -> None:
+        new = [user_id for user_id in store.summaries if user_id not in known]
+        known.update(new)
+        async_add_entities(GymSensor(entry, user_id, description) for user_id in new for description in SENSORS)
+
+    add_new_users()
+    entry.async_on_unload(async_dispatcher_connect(hass, SIGNAL_DATA_UPDATED, add_new_users))
 
 
 class GymSensor(SensorEntity):
-    """A figure calculated from the training history."""
+    """A figure calculated from the training history of one user."""
 
     entity_description: GymSensorDescription
     _attr_has_entity_name = True
     _attr_should_poll = False
 
-    def __init__(self, entry: GymTrackerConfigEntry, description: GymSensorDescription) -> None:
+    def __init__(self, entry: GymTrackerConfigEntry, user_id: str, description: GymSensorDescription) -> None:
         """Initialize the sensor."""
         self.entity_description = description
         self._store: GymStore = entry.runtime_data
-        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._user_id = user_id
+        name = f"{NAME} {self._store.user_names.get(user_id, user_id)}"
+        if user_id == self._store.legacy_user:
+            # The owner of the data from before 0.3.0 keeps the ids of the former single-user
+            # sensors, so their entity ids (dashboards, automations) stay the same.
+            self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+            identifier = entry.entry_id
+        else:
+            self._attr_unique_id = f"{entry.entry_id}_{user_id}_{description.key}"
+            identifier = f"{entry.entry_id}_{user_id}"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)}, name=NAME, entry_type=DeviceEntryType.SERVICE
+            identifiers={(DOMAIN, identifier)}, name=name, entry_type=DeviceEntryType.SERVICE
         )
 
     async def async_added_to_hass(self) -> None:
@@ -92,12 +111,17 @@ class GymSensor(SensorEntity):
         self.async_write_ha_state()
 
     @property
+    def available(self) -> bool:
+        """The user still has a plan."""
+        return self._user_id in self._store.summaries
+
+    @property
     def native_value(self) -> Any:
         """Return the current value."""
-        return self.entity_description.value_fn(self._store.summary)
+        return self.entity_description.value_fn(self._store.summaries.get(self._user_id, {}))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         """Return additional figures."""
         fn = self.entity_description.attrs_fn
-        return fn(self._store.summary) if fn else None
+        return fn(self._store.summaries.get(self._user_id, {})) if fn else None

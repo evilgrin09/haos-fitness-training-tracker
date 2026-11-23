@@ -18,9 +18,12 @@
     "step": {
       "init": {
         "title": "Gym Tracker Optionen",
+        "description": "Erlaubte Benutzer: leer = alle Benutzer dürfen das Panel nutzen. Jeder Benutzer sieht nur seine eigenen Pläne und Trainings.\n\nFalls angezeigt: {plans} Plan/Pläne und {sessions} Einheit(en) aus der Zeit vor Version 0.3.0 sind noch keinem Benutzer zugeordnet. Wähle unter „Bestehende Daten zuordnen an“, wem sie gehören. Zur Auswahl stehen nur Benutzer ohne eigenen Plan.",
         "data": {
           "show_panel": "In der Seitenleiste anzeigen",
-          "panel_title": "Titel in der Seitenleiste"
+          "panel_title": "Titel in der Seitenleiste",
+          "allowed_users": "Erlaubte Benutzer",
+          "legacy_owner": "Bestehende Daten zuordnen an"
         }
       }
     }
