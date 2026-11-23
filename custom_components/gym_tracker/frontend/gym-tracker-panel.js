@@ -39,6 +39,22 @@ const KINDS = [
   ["time", "Sekunden", "Zeit pro Satz"],
 ];
 
+const CARDIO_DEVICES = [
+  ["crosstrainer", "Crosstrainer"],
+  ["bike", "Fahrrad"],
+  ["treadmill", "Laufband"],
+];
+const CARDIO_LABEL = Object.fromEntries(CARDIO_DEVICES);
+const PHASE_TITLE = { warmup: "Aufwärmen (Cardio)", cooldown: "Auslaufen (Cardio)" };
+
+function cardioText(entries) {
+  return entries.map((c) => `${CARDIO_LABEL[c.device]} ${c.minutes} Min.`).join(" · ");
+}
+
+function uuid() {
+  return globalThis.crypto?.randomUUID ? crypto.randomUUID().replaceAll("-", "") : `${Date.now()}${Math.random()}`.replace(".", "");
+}
+
 const NEW_EXERCISE = { kind: "weight", target_sets: 3, reps_min: 12, reps_max: 14, duration_s: 30, start_weight: 20 };
 
 /* ---------------------------------------------------------------- helpers */
@@ -172,6 +188,8 @@ function lineChart(def, width, height = 190) {
 function barChart(def, width, height = 190) {
   const bars = def.bars;
   const refs = def.refs || [];
+  // Stacked bars carry segments [{v, cls}] bottom-up; v is their sum.
+  for (const b of bars) if (b.segments) b.v = b.segments.reduce((sum, seg) => sum + seg.v, 0);
   const top = Math.max(1, ...bars.map((b) => b.v), ...refs.map((r) => r.v));
   const scale = niceScale(0, top, Math.min(4, def.integer ? Math.max(1, Math.ceil(top)) : 4));
   scale.min = 0;
@@ -193,7 +211,22 @@ function barChart(def, width, height = 190) {
     const yTop = frame.y(b.v);
     const r = Math.min(4, bw / 2, base - yTop);
     const x0 = xs[i] - bw / 2;
-    svg += `<path class="bar" d="M${x0},${base}V${yTop + r}Q${x0},${yTop} ${x0 + r},${yTop}H${x0 + bw - r}Q${x0 + bw},${yTop} ${x0 + bw},${yTop + r}V${base}Z"></path>`;
+    const roundTop = (cls, bottom) =>
+      `<path class="${cls}" d="M${x0},${bottom}V${yTop + r}Q${x0},${yTop} ${x0 + r},${yTop}H${x0 + bw - r}Q${x0 + bw},${yTop} ${x0 + bw},${yTop + r}V${bottom}Z"></path>`;
+    if (b.segments) {
+      // 2px surface gap between the segments; only the top segment gets the rounded end.
+      const segs = b.segments.filter((seg) => seg.v > 0);
+      let sum = 0;
+      segs.forEach((seg, k) => {
+        const bottom = frame.y(sum) - (k ? 1 : 0);
+        sum += seg.v;
+        if (k === segs.length - 1) svg += roundTop(`seg ${seg.cls}`, bottom);
+        else {
+          const y = frame.y(sum) + 1;
+          if (bottom - y > 0) svg += `<rect class="seg ${seg.cls}" x="${x0}" y="${y}" width="${bw}" height="${bottom - y}"></rect>`;
+        }
+      });
+    } else svg += roundTop("bar", base);
     if (b.mark) svg += STAR(xs[i], yTop - 4);
   });
   for (const ref of refs) {
@@ -207,6 +240,10 @@ function barChart(def, width, height = 190) {
 
 const STYLE = `
 :host {
+  /* Cardio devices: validated categorical slots 1–3 (blue, orange, aqua) */
+  --gt-c1: #2a78d6;
+  --gt-c2: #eb6834;
+  --gt-c3: #1baf7a;
   --gt-bg: var(--primary-background-color, #fafafa);
   --gt-surface: var(--card-background-color, #fff);
   --gt-text: var(--primary-text-color, #212121);
@@ -221,6 +258,7 @@ const STYLE = `
   font-family: var(--paper-font-body1_-_font-family, Roboto, "Noto Sans", sans-serif);
   font-size: 16px; line-height: 1.4; -webkit-tap-highlight-color: transparent;
 }
+:host(.dark) { --gt-c1: #3987e5; --gt-c2: #d95926; --gt-c3: #199e70; }
 * { box-sizing: border-box; }
 .header { position: sticky; top: 0; z-index: 5; background: var(--app-header-background-color, var(--gt-primary));
   color: var(--app-header-text-color, #fff); padding-top: env(safe-area-inset-top); }
@@ -301,6 +339,15 @@ h2:first-child { margin-top: 0; }
 .chart .line { fill: none; stroke: var(--gt-primary); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .chart .dot { fill: var(--gt-primary); stroke: var(--gt-surface); stroke-width: 2; }
 .chart .bar { fill: var(--gt-primary); }
+.chart .seg.d1 { fill: var(--gt-c1); }
+.chart .seg.d2 { fill: var(--gt-c2); }
+.chart .seg.d3 { fill: var(--gt-c3); }
+.key { display: inline-flex; align-items: center; gap: 5px; margin-right: 12px; }
+.key i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.num { width: 100%; max-width: 110px; text-align: center; font: inherit; font-size: 30px; font-weight: 500; border: 0;
+  border-bottom: 2px solid var(--gt-divider); background: transparent; color: var(--gt-text); padding: 0; -moz-appearance: textfield; }
+.num::-webkit-outer-spin-button, .num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.num:focus { outline: none; border-bottom-color: var(--gt-primary); }
 .chart .ring { fill: none; stroke: var(--gt-accent); stroke-width: 2; }
 .chart .star { fill: var(--gt-accent); font-size: 13px; }
 .chart .ref { stroke: var(--gt-muted); stroke-width: 1.5; stroke-dasharray: 5 4; }
@@ -402,6 +449,7 @@ class GymTrackerPanel extends HTMLElement {
   set hass(hass) {
     const first = !this._hass;
     this._hass = hass;
+    this.classList.toggle("dark", Boolean(hass.themes?.darkMode));
     if (this._menuButton) this._menuButton.hass = hass;
     if (first) {
       this._setup();
@@ -429,7 +477,7 @@ class GymTrackerPanel extends HTMLElement {
         this._resizeTimer = setTimeout(() => this._drawCharts(), 100);
       });
       this._onVisible = () => {
-        const editing = this._form || this._exForm || this._adopt || this._confirm;
+        const editing = this._form || this._exForm || this._adopt || this._confirm || this._cf?.context === "history";
         if (document.visibilityState === "visible" && this._hass && !editing) this._loadOverview();
       };
     }
@@ -629,6 +677,7 @@ class GymTrackerPanel extends HTMLElement {
 
   _renderTraining() {
     if (this._view === "summary" && this._summary) return this._renderSummary();
+    if (this._session && this._view === "cardio") return this._renderCardioStep();
     if (this._session && this._view === "warmup") return this._renderWarmup();
     if (this._session && this._view === "exercise") return this._renderExercise();
     if (this._session && this._view === "list") return this._renderList();
@@ -643,6 +692,7 @@ class GymTrackerPanel extends HTMLElement {
   _sessionRow(s) {
     const parts = [fmtDuration(s.duration_s), `${s.done} Übungen`];
     if (s.volume) parts.push(`${num(s.volume)} kg`);
+    if (s.cardio_minutes) parts.push(`${s.cardio_minutes} Min. Cardio`);
     const badge = s.status === "cancelled" ? ` <span class="badge">abgebrochen</span>` : "";
     return `<li data-action="open-session" data-id="${s.id}">
       <div class="grow"><div class="title">${esc(fmtDate(s.date))}${badge}</div>
@@ -740,6 +790,60 @@ class GymTrackerPanel extends HTMLElement {
       ${archive}`;
   }
 
+  /* Device tiles, minutes stepper (no default value) and the save button. */
+  _cardioForm() {
+    const f = this._cf;
+    const valid = f.device && f.minutes >= 1 && f.minutes <= 180;
+    const tiles = CARDIO_DEVICES.map(([id, label]) => `<button class="${f.device === id ? "active" : ""}" data-action="cf-device" data-device="${id}">${label}</button>`).join("");
+    return `<div class="field"><div class="label"><span>Gerät</span></div><div class="kinds">${tiles}</div></div>
+      <div class="field"><div class="label"><span>Dauer</span><span>Minuten antippen zum Eintippen</span></div>
+        <div class="stepper">
+          <button data-action="cf-step" data-dir="-1" aria-label="Minuten verringern">−</button>
+          <div class="val"><input class="num" type="number" inputmode="numeric" min="1" max="180" step="1" data-input="cf-minutes"
+            value="${f.minutes ?? ""}" placeholder="–" aria-label="Minuten"> <small>Min.</small></div>
+          <button data-action="cf-step" data-dir="1" aria-label="Minuten erhöhen">+</button>
+        </div></div>
+      <div class="field stack">
+        <button class="btn primary" data-action="cf-save" ${valid ? "" : "disabled"}>${f.editId ? "Änderung speichern" : "Hinzufügen"}</button>
+        ${f.editId || f.context === "history" ? `<button class="btn" data-action="cf-cancel">Abbrechen</button>` : ""}
+      </div>`;
+  }
+
+  _cardioEntries(entries, editable = true) {
+    if (!entries.length) return "";
+    return `<ul class="list">${entries
+      .map((c) => `<li><span class="state done">✓</span><div class="grow"><div class="title">${esc(CARDIO_LABEL[c.device])}</div>
+          <div class="small muted">${c.minutes} Min.</div></div>
+          ${editable ? `<button class="btn slim" data-action="cf-edit" data-id="${c.id}" aria-label="Bearbeiten">✎</button>
+          <button class="btn slim danger" data-action="cf-delete" data-id="${c.id}" aria-label="Löschen">✕</button>` : ""}</li>`)
+      .join("")}</ul>`;
+  }
+
+  _renderCardioStep() {
+    const phase = this._cardioPhase;
+    const entries = this._session.cardio[phase];
+    const total = entries.reduce((sum, c) => sum + c.minutes, 0);
+    const next = phase === "warmup" ? "Weiter zum Warm-up" : "Weiter zur Übersicht";
+    return `<div class="topline"><span>${phase === "warmup" ? "Vor dem Training" : "Nach der letzten Übung"}</span>
+        <button class="btn slim" data-action="${phase === "warmup" ? "home" : "list"}">${phase === "warmup" ? "Pause" : "Übersicht"}</button></div>
+      <h1>${PHASE_TITLE[phase]}</h1>
+      <div class="card">${this._cardioForm()}</div>
+      ${entries.length ? `<div class="card"><h3>Erfasst · ${total} Min.</h3>${this._cardioEntries(entries)}</div>` : ""}
+      <div class="actions stack">
+        ${entries.length
+          ? `<button class="btn primary big" data-action="cardio-next">${next}</button>`
+          : `<button class="btn big" data-action="cardio-next">Überspringen</button>`}
+      </div>`;
+  }
+
+  _cardioRow(phase) {
+    const entries = this._session.cardio[phase];
+    return `<li data-action="cardio-open" data-phase="${phase}">${entries.length ? `<span class="state done">✓</span>` : `<span class="state"></span>`}
+      <div class="grow"><div class="title">${PHASE_TITLE[phase]}</div>
+      <div class="small muted">${entries.length ? esc(cardioText(entries)) : "Optional – antippen zum Erfassen"}</div></div>
+      <div class="side">›</div></li>`;
+  }
+
   _renderWarmup() {
     return `<div class="topline"><span>Warm-up</span>
         <button class="btn slim" data-action="home">Pause</button></div>
@@ -814,11 +918,11 @@ class GymTrackerPanel extends HTMLElement {
     return `<div class="topline"><span>${esc(s.plan_name)} · seit ${fmtTime(s.started_at)} Uhr</span>
         <button class="btn slim" data-action="home">Pause</button></div>
       <h1>Übersicht</h1>
-      <div class="card"><ul class="list">${rows}</ul></div>
+      <div class="card"><ul class="list">${this._cardioRow("warmup")}${rows}${this._cardioRow("cooldown")}</ul></div>
       <button class="btn" data-action="ex-add-session">+ Übung hinzufügen</button>
       <div class="actions stack">
         <div class="small muted" style="text-align:center">${done} erfasst · ${s.summary.skipped} übersprungen · ${open} offen</div>
-        <button class="btn primary big" data-action="finish" ${done ? "" : "disabled"}>Training beenden</button>
+        <button class="btn primary big" data-action="finish" ${done || s.summary.cardio.minutes ? "" : "disabled"}>Training beenden</button>
         <button class="btn danger" data-action="cancel-session">Training abbrechen</button>
       </div>`;
   }
@@ -839,7 +943,22 @@ class GymTrackerPanel extends HTMLElement {
       ${this._tile("Volumen", `${num(summary.volume)}<span class="muted" style="font-size:15px"> kg</span>`)}
       ${this._tile("Übungen", `${summary.done}<span class="muted" style="font-size:15px"> / ${summary.total}</span>`, summary.skipped ? `${summary.skipped} übersprungen` : "")}
       ${this._tile("Ø Intensität", summary.avg_rpe !== null ? `RPE ${num(summary.avg_rpe, 1)}` : "–")}
+      ${summary.cardio.minutes
+        ? this._tile("Cardio", `${summary.cardio.minutes}<span class="muted" style="font-size:15px"> Min.</span>`, `Aufw. ${summary.cardio.by_phase.warmup} · Ausl. ${summary.cardio.by_phase.cooldown}`)
+        : ""}
     </div>`;
+  }
+
+  _cardioCard(session, editable) {
+    const parts = ["warmup", "cooldown"].map((phase) => {
+      const entries = session.cardio[phase];
+      const add = editable ? `<button class="btn slim" data-action="cf-add-history" data-phase="${phase}">+ Nachtragen</button>` : "";
+      if (!entries.length && !editable) return "";
+      return `<div class="topline" style="margin-top:8px"><b>${PHASE_TITLE[phase]}</b>${add}</div>
+        ${entries.length ? this._cardioEntries(entries, editable) : `<div class="small muted">Nicht erfasst</div>`}`;
+    });
+    if (!parts.join("")) return "";
+    return `<div class="card"><h3>Cardio</h3>${parts.join("")}</div>`;
   }
 
   _renderSummary() {
@@ -853,7 +972,8 @@ class GymTrackerPanel extends HTMLElement {
       <div class="muted" style="margin-bottom:12px">${esc(s.plan_name)} · ${esc(fmtDate(s.local_date))}</div>
       ${this._summaryTiles(s.summary)}
       ${this._changes(s.summary)}
-      <div class="card"><h3>Übungen</h3><ul class="list">${rows}</ul></div>
+      ${this._cardioCard(s, false)}
+      ${rows ? `<div class="card"><h3>Übungen</h3><ul class="list">${rows}</ul></div>` : ""}
       <div class="actions"><button class="btn primary big" data-action="summary-done">Fertig</button></div>`;
   }
 
@@ -910,7 +1030,43 @@ class GymTrackerPanel extends HTMLElement {
         ${this._chartCard("volume", `Gesamtvolumen pro ${per}`, t.volume ? volumeDef : null, "Sätze × Wdh. × Gewicht")}
         ${this._chartCard("rpe", "Ø Intensität je Training (RPE)", rpeDef)}
       </div>`;
-    return `${chips}${overall}${this._renderExerciseStats()}`;
+    return `${chips}${overall}${this._renderCardioStats(st, bucketLabel, bucketTitle, per)}${this._renderExerciseStats()}`;
+  }
+
+  _renderCardioStats(st, bucketLabel, bucketTitle, per) {
+    const c = st.cardio;
+    const head = `<h2>Cardio</h2>`;
+    if (!c.minutes) return `${head}<div class="card"><div class="empty">Im Zeitraum kein Cardio erfasst.</div></div>`;
+    const keyed = CARDIO_DEVICES.map(([id, label], i) => ({ id, label, cls: `d${i + 1}` }));
+    const legend = keyed
+      .map((d) => `<span class="key"><i style="background:var(--gt-c${d.cls[1]})"></i>${d.label} ${c.by_device[d.id]} Min.</span>`)
+      .join("");
+    const stackDef = {
+      type: "bar",
+      unit: "Min.",
+      bars: c.buckets.map((b) => ({
+        label: bucketLabel(b),
+        segments: keyed.map((d) => ({ v: b.by_device[d.id], cls: d.cls })),
+        tip: `${bucketTitle(b)}<br><b>${b.minutes} Min.</b>${keyed.filter((d) => b.by_device[d.id]).map((d) => `<br>${d.label}: ${b.by_device[d.id]} Min.`).join("")}`,
+      })),
+    };
+    const lineDef = {
+      type: "line",
+      unit: "Min.",
+      min: 0,
+      points: c.sessions.map((p) => ({ t: day(p.date).getTime(), v: p.minutes, label: shortDate(p.date), tip: `${fmtDate(p.date)}<br><b>${p.minutes} Min. Cardio</b>` })),
+    };
+    return `${head}
+      <div class="tiles">
+        ${this._tile("Cardio gesamt", `${c.minutes}<span class="muted" style="font-size:15px"> Min.</span>`)}
+        ${this._tile("Anteil an der Trainingszeit", c.share !== null ? `${num(c.share * 100)} %` : "–")}
+        ${this._tile("Aufwärmen", `${c.by_phase.warmup}<span class="muted" style="font-size:15px"> Min.</span>`)}
+        ${this._tile("Auslaufen", `${c.by_phase.cooldown}<span class="muted" style="font-size:15px"> Min.</span>`)}
+      </div>
+      <div class="grid">
+        ${this._chartCard("cardio-stack", `Cardio-Minuten pro ${per} nach Gerät`, stackDef, legend)}
+        ${this._chartCard("cardio-line", "Cardio-Minuten je Training", lineDef)}
+      </div>`;
   }
 
   _renderExerciseStats() {
@@ -1051,6 +1207,7 @@ class GymTrackerPanel extends HTMLElement {
       ${this._summaryTiles(s.summary)}
       ${this._changes(s.summary)}
       <div class="card"><h3>Übungen</h3><ul class="list">${rows}</ul></div>
+      ${this._cardioCard(s, true)}
       <div class="card"><h3>Notiz zur Einheit</h3>
         <div class="row"><input type="text" data-input="session-note" value="${esc(s.note)}" placeholder="Optional" maxlength="300">
         <button class="btn slim" style="flex:none" data-action="save-note">Speichern</button></div></div>
@@ -1095,6 +1252,11 @@ class GymTrackerPanel extends HTMLElement {
     }
     if (this._exForm) {
       host.innerHTML = this._renderExForm();
+      return;
+    }
+    if (this._cf?.context === "history") {
+      host.innerHTML = `<div class="modal"><div class="sheet"><h2>${PHASE_TITLE[this._cf.phase]}</h2>
+        <div class="muted">${this._cf.editId ? "Eintrag ändern" : "Nachtragen"}</div>${this._cardioForm()}</div></div>`;
       return;
     }
     const f = this._form;
@@ -1250,6 +1412,14 @@ class GymTrackerPanel extends HTMLElement {
     if (kind === "form-note" && this._form) this._form.note = ev.target.value;
     if (kind === "session-note") this._noteDraft = ev.target.value;
     if (kind === "plan-name" && this._planForm) this._planForm.name = ev.target.value;
+    if (kind === "cf-minutes" && this._cf) {
+      const value = parseInt(ev.target.value, 10);
+      this._cf.minutes = Number.isNaN(value) ? null : value;
+      // Only the button is updated, so the field keeps the focus while typing.
+      const valid = this._cf.device && this._cf.minutes >= 1 && this._cf.minutes <= 180;
+      const button = this.shadowRoot.querySelector('[data-action="cf-save"]');
+      if (button) button.disabled = !valid;
+    }
     const f = this._exForm;
     if (!f || !kind?.startsWith("ex-")) return;
     if (kind === "ex-name") {
@@ -1284,14 +1454,126 @@ class GymTrackerPanel extends HTMLElement {
     const items = this._session.items;
     let idx = items.findIndex((item, i) => i >= from && !item.entry);
     if (idx < 0) idx = items.findIndex((item) => !item.entry);
-    if (idx < 0) this._show("list");
+    if (idx < 0) this._afterLastExercise();
     else this._show("exercise", idx);
+  }
+
+  /* Phases of the cardio steps already passed in this session (kept while the panel is open). */
+  _cardioPassed(phase) {
+    return this._passed?.session === this._session.id && this._passed[phase];
+  }
+
+  _passCardio(phase) {
+    if (this._passed?.session !== this._session.id) this._passed = { session: this._session.id };
+    this._passed[phase] = true;
+  }
+
+  _showCardio(phase) {
+    this._cardioPhase = phase;
+    this._cf = { context: "workout", phase, device: null, minutes: null, editId: null };
+    this._show("cardio");
+  }
+
+  /* After the last exercise: cool-down cardio once, then the overview. */
+  _afterLastExercise() {
+    if (!this._session.cardio.cooldown.length && !this._cardioPassed("cooldown")) this._showCardio("cooldown");
+    else this._show("list");
+  }
+
+  _strengthStart() {
+    const s = this._session;
+    if (s.warmup && !s.warmup_done && !s.items.some((i) => i.entry)) this._show("warmup");
+    else this._gotoNextOpen(0);
   }
 
   _enterWorkout() {
     const s = this._session;
-    if (s.warmup && !s.warmup_done && !s.items.some((i) => i.entry)) this._show("warmup");
-    else this._gotoNextOpen(0);
+    const fresh = !s.warmup_done && !s.items.some((i) => i.entry) && !s.cardio.warmup.length && !s.cardio.cooldown.length;
+    if (fresh && !this._cardioPassed("warmup")) this._showCardio("warmup");
+    else this._strengthStart();
+  }
+
+  _act_cardio_next() {
+    const phase = this._cardioPhase;
+    this._passCardio(phase);
+    this._cf = null;
+    if (phase === "warmup") this._strengthStart();
+    else this._show("list");
+  }
+
+  _act_cardio_open({ phase }) {
+    this._showCardio(phase);
+  }
+
+  _cfRender() {
+    if (this._cf?.context === "history") this._renderModal();
+    else this._render();
+  }
+
+  _act_cf_device({ device }) {
+    this._cf.device = device;
+    this._cfRender();
+  }
+
+  _act_cf_step({ dir }) {
+    const f = this._cf;
+    f.minutes = Math.max(1, Math.min(180, (f.minutes ?? 0) + Number(dir)));
+    this._cfRender();
+  }
+
+  _act_cf_edit({ id }) {
+    const context = this._tab === "history" ? "history" : "workout";
+    const session = context === "history" ? this._detail : this._session;
+    const entry = [...session.cardio.warmup, ...session.cardio.cooldown].find((c) => c.id === Number(id));
+    this._cf = { context, phase: entry.phase, device: entry.device, minutes: entry.minutes, editId: entry.id, sessionId: session.id };
+    this._cfRender();
+  }
+
+  _act_cf_cancel() {
+    const f = this._cf;
+    this._cf = f.context === "history" ? null : { context: "workout", phase: f.phase, device: null, minutes: null, editId: null };
+    this._cfRender();
+  }
+
+  _act_cf_add_history({ phase }) {
+    this._cf = { context: "history", phase, device: null, minutes: null, editId: null, sessionId: this._detail.id };
+    this._renderModal();
+  }
+
+  _applyCardioResult(session) {
+    if (this._tab === "history") {
+      this._detail = session;
+      this._cf = null;
+      this._renderModal();
+    } else {
+      this._session = session;
+      this._cf = { context: "workout", phase: this._cardioPhase, device: null, minutes: null, editId: null };
+    }
+    this._render();
+  }
+
+  _act_cf_save() {
+    const f = this._cf;
+    this._run(async () => {
+      const session = f.editId
+        ? await this._call("cardio/update", { cardio_id: f.editId, device: f.device, minutes: f.minutes })
+        : await this._call("cardio/add", {
+            session_id: f.context === "history" ? f.sessionId : this._session.id,
+            phase: f.phase,
+            device: f.device,
+            minutes: f.minutes,
+            uuid: uuid(),
+          });
+      this._applyCardioResult(session);
+      this._toast("Gespeichert");
+    });
+  }
+
+  _act_cf_delete({ id }) {
+    const remove = async () => this._applyCardioResult(await this._call("cardio/delete", { cardio_id: Number(id) }));
+    if (this._tab === "history") {
+      this._ask({ title: "Cardio-Eintrag löschen?", text: "Der Eintrag wird aus der Einheit entfernt.", yes: "Löschen", danger: true, run: remove });
+    } else this._run(remove);
   }
 
   _act_start() {
@@ -1335,7 +1617,7 @@ class GymTrackerPanel extends HTMLElement {
   }
 
   _act_next() {
-    if (this._idx >= this._session.items.length - 1) this._show("list");
+    if (this._idx >= this._session.items.length - 1) this._afterLastExercise();
     else this._show("exercise", this._idx + 1);
   }
 

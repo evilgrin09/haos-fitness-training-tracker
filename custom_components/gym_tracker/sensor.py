@@ -13,6 +13,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
+from homeassistant.const import UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -56,6 +57,15 @@ SENSORS: tuple[GymSensorDescription, ...] = (
         translation_key="workouts_month",
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda s: s.get("month"),
+    ),
+    GymSensorDescription(
+        key="cardio_week",
+        translation_key="cardio_week",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        value_fn=lambda s: s.get("cardio_week"),
     ),
 )
 

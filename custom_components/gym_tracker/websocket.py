@@ -267,6 +267,48 @@ async def ws_stats_exercise(hass: HomeAssistant, store: GymStore, msg: dict[str,
     return await store.async_read(lambda db: db.exercise_stats(uid, msg["exercise_id"], since))
 
 
+_DEVICE = vol.In(list(logic.CARDIO_DEVICES))
+_MINUTES = vol.All(vol.Coerce(int), vol.Range(min=logic.CARDIO_MIN_MINUTES, max=logic.CARDIO_MAX_MINUTES))
+
+
+@_command(
+    "cardio/add",
+    {
+        vol.Required("session_id"): _ID,
+        vol.Required("phase"): vol.In(list(logic.CARDIO_PHASES)),
+        vol.Required("device"): _DEVICE,
+        vol.Required("minutes"): _MINUTES,
+        vol.Optional("uuid"): cv.string,
+    },
+)
+async def ws_cardio_add(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
+    """Add a cardio entry to the warm-up or cool-down of a session."""
+    now = dt_util.utcnow()
+
+    def job(db: GymDatabase) -> dict[str, Any]:
+        db.add_cardio(uid, msg["session_id"], msg["phase"], msg["device"], msg["minutes"], now, msg.get("uuid"))
+        return db.session_detail(uid, msg["session_id"])
+
+    return await store.async_write(job)
+
+
+@_command(
+    "cardio/update",
+    {vol.Required("cardio_id"): _ID, vol.Required("device"): _DEVICE, vol.Required("minutes"): _MINUTES},
+)
+async def ws_cardio_update(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
+    """Change a cardio entry."""
+    return await store.async_write(
+        lambda db: db.session_detail(uid, db.update_cardio(uid, msg["cardio_id"], msg["device"], msg["minutes"]))
+    )
+
+
+@_command("cardio/delete", {vol.Required("cardio_id"): _ID})
+async def ws_cardio_delete(hass: HomeAssistant, store: GymStore, msg: dict[str, Any], uid: str) -> dict[str, Any]:
+    """Delete a cardio entry."""
+    return await store.async_write(lambda db: db.session_detail(uid, db.delete_cardio(uid, msg["cardio_id"])))
+
+
 def _exercise_data(msg: dict[str, Any]) -> dict[str, Any]:
     return {key: msg.get(key) for key in EXERCISE_FIELDS}
 
@@ -365,5 +407,8 @@ def async_register(hass: HomeAssistant) -> None:
         ws_exercise_archive,
         ws_exercise_restore,
         ws_session_add_exercise,
+        ws_cardio_add,
+        ws_cardio_update,
+        ws_cardio_delete,
     ):
         websocket_api.async_register_command(hass, command)

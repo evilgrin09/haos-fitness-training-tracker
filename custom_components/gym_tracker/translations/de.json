@@ -38,6 +38,9 @@
       },
       "workouts_month": {
         "name": "Trainings diesen Monat"
+      },
+      "cardio_week": {
+        "name": "Cardio-Minuten diese Woche"
       }
     }
   }

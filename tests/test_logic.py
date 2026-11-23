@@ -132,7 +132,25 @@ def test_build_csv() -> None:
     assert lines[0].startswith("﻿Datum;Start;Ende;Status;Plan;Übung")
     assert lines[1] == (
         '2026-11-16;2026-11-16T17:00:00+00:00;;abgeschlossen;Ganzkörper-Training;Beinpresse;'
-        'Beine & Rumpf;1;14;;62,5;7;nein;"gut; leicht";nein'
+        'Beine & Rumpf;1;14;;62,5;7;nein;"gut; leicht";nein;;;'
     )
-    assert lines[2].endswith(';;;;;;ja;"gut; leicht";nein')
-    assert logic.build_csv([{**row, "archived": 1}]).split("\r\n")[1].endswith(";ja")
+    assert lines[2].endswith(';;;;;;ja;"gut; leicht";nein;;;')
+    assert logic.build_csv([{**row, "archived": 1}]).split("\r\n")[1].endswith(";ja;;;")
+
+
+def test_build_csv_with_cardio_rows_in_session_order() -> None:
+    base = {"date": "2026-11-16", "started_at": "2026-11-16T17:00:00+00:00", "ended_at": None,
+            "status": "completed", "plan": "P", "session_id": 1}  # fmt: skip
+    strength = {**base, "exercise": "Beinpresse", "muscle_group": "Beine", "set_no": 1, "reps": 14,
+                "seconds": None, "weight": 60, "rpe": 7, "skipped": 0, "note": "", "archived": 0}  # fmt: skip
+    cardio = [
+        {**base, "phase": "cooldown", "device": "treadmill", "minutes": 5, "position": 1},
+        {**base, "phase": "warmup", "device": "bike", "minutes": 10, "position": 1},
+    ]
+    lines = logic.build_csv([strength], cardio).strip().split("\r\n")
+    assert lines[0].endswith(";Archiviert;Cardio-Phase;Gerät;Minuten")
+    assert [line.split(";")[5] for line in lines[1:]] == ["Cardio", "Beinpresse", "Cardio"]
+    assert lines[1].split(";")[-3:] == ["Aufwärmen", "Fahrrad", "10"]
+    assert lines[3].split(";")[-3:] == ["Auslaufen", "Laufband", "5"]
+    assert lines[1].split(";")[6:15] == [""] * 9
+    assert len({len(line.split(";")) for line in lines}) == 1

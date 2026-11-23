@@ -244,3 +244,30 @@ async def test_plan_editing_and_spontaneous_exercise(hass: HomeAssistant, entry,
     stats = await _ws(client, "stats/exercise", exercise_id=added["exercise_id"], range="all")
     assert stats["exercise"]["archived"] is True
     assert len(stats["points"]) == 1
+
+
+async def test_cardio_commands_and_sensor(hass: HomeAssistant, entry, hass_ws_client, hass_client) -> None:
+    client = await hass_ws_client(hass)
+    session = await _ws(client, "session/start")
+    session = await _ws(client, "cardio/add", session_id=session["id"], phase="warmup", device="bike", minutes=5)
+    session = await _ws(client, "cardio/add", session_id=session["id"], phase="warmup", device="treadmill", minutes=5)
+    first = session["cardio"]["warmup"][0]["id"]
+    session = await _ws(client, "cardio/update", cardio_id=first, device="crosstrainer", minutes=7)
+    assert [(c["device"], c["minutes"]) for c in session["cardio"]["warmup"]] == [("crosstrainer", 7), ("treadmill", 5)]
+    session = await _ws(client, "cardio/add", session_id=session["id"], phase="cooldown", device="bike", minutes=10)
+    await client.send_json_auto_id(
+        {"type": f"{DOMAIN}/cardio/add", "session_id": session["id"], "phase": "warmup", "device": "bike", "minutes": 0}
+    )
+    assert not (await client.receive_json())["success"]
+    finished = await _ws(client, "session/finish", session_id=session["id"])
+    assert finished["summary"]["cardio"]["minutes"] == 22
+    await hass.async_block_till_done()
+    assert _state(hass, entry, "cardio_week") == "22"
+    assert _state(hass, entry, "workouts_week") == "1"
+    stats = await _ws(client, "stats/overview", range="4w")
+    assert stats["cardio"]["by_phase"] == {"warmup": 12, "cooldown": 10}
+    session = await _ws(client, "cardio/delete", cardio_id=first)
+    await hass.async_block_till_done()
+    assert _state(hass, entry, "cardio_week") == "15"
+    text = await (await (await hass_client()).get(EXPORT_URL)).text()
+    assert text.count(";Cardio;") == 2

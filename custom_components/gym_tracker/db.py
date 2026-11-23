@@ -103,6 +103,20 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX idx_plans_user ON plans(user_id);
     CREATE INDEX idx_sessions_user ON sessions(user_id, status);
     """,
+    # 4: cardio before (warm-up) and after (cool-down) the strength exercises
+    """
+    CREATE TABLE cardio_entries (
+        id INTEGER PRIMARY KEY,
+        uuid TEXT NOT NULL UNIQUE,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        phase TEXT NOT NULL CHECK (phase IN ('warmup', 'cooldown')),
+        device TEXT NOT NULL CHECK (device IN ('crosstrainer', 'bike', 'treadmill')),
+        minutes INTEGER NOT NULL CHECK (minutes BETWEEN 1 AND 180),
+        position INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_cardio_session ON cardio_entries(session_id);
+    """,
 )
 
 # Release that wrote a schema version; names the backup taken before migrating away from it.
@@ -178,6 +192,13 @@ def normalize_exercise(data: dict[str, Any]) -> dict[str, Any]:
         columns["weighted"] = 1
         columns["start_weight"] = float(weight)
     return columns
+
+
+def _check_cardio(device: str, minutes: Any) -> None:
+    if device not in logic.CARDIO_DEVICES:
+        raise GymError("invalid_values", f"Unknown device {device}")
+    if not _int_between(minutes, logic.CARDIO_MIN_MINUTES, logic.CARDIO_MAX_MINUTES):
+        raise GymError("invalid_values", "Minutes must be between 1 and 180")
 
 
 def _iso(moment: datetime) -> str:
@@ -653,12 +674,10 @@ class GymDatabase:
         session = self._session_row(user_id, session_id)
         if session["status"] != STATUS_RUNNING:
             raise GymError("not_running", "Session is not running")
-        last = self._one(
-            "SELECT MAX(created_at) AS last FROM entries WHERE session_id = ? AND skipped = 0", (session_id,)
-        )
-        if last is None or last["last"] is None:
+        last = self._last_activity(session_id, include_skipped=False)
+        if last is None:
             raise GymError("empty_session", "No exercise recorded yet")
-        end = logic.session_end(now, datetime.fromisoformat(last["last"]))
+        end = logic.session_end(now, last)
         with self._conn:
             self._conn.execute(
                 "UPDATE sessions SET status = ?, ended_at = ? WHERE id = ?", (STATUS_COMPLETED, _iso(end), session_id)
@@ -678,20 +697,27 @@ class GymDatabase:
         session = self._session_row(user_id, session_id)
         if session["status"] != STATUS_RUNNING:
             raise GymError("not_running", "Session is not running")
-        last = self._one(
-            "SELECT MAX(created_at) AS last, COUNT(*) AS n FROM entries WHERE session_id = ?", (session_id,)
-        )
-        assert last is not None
-        if not last["n"]:
+        last = self._last_activity(session_id, include_skipped=True)
+        if last is None:
             self.delete_session(user_id, session_id)
             return False
-        end = logic.session_end(now, datetime.fromisoformat(last["last"]))
+        end = logic.session_end(now, last)
         with self._conn:
             self._conn.execute(
                 "UPDATE sessions SET status = ?, ended_at = ? WHERE id = ?", (STATUS_CANCELLED, _iso(end), session_id)
             )
             self._delete_unused(self._created_extras(session_id))
         return True
+
+    def _last_activity(self, session_id: int, include_skipped: bool) -> datetime | None:
+        """Time of the last recorded exercise or cardio entry of a session."""
+        row = self._one(
+            "SELECT MAX(at) AS last FROM ("
+            " SELECT created_at AS at FROM entries WHERE session_id = ? AND (skipped = 0 OR ?)"
+            " UNION ALL SELECT created_at FROM cardio_entries WHERE session_id = ?)",
+            (session_id, int(include_skipped), session_id),
+        )
+        return datetime.fromisoformat(row["last"]) if row and row["last"] else None
 
     @_locked
     def delete_session(self, user_id: str, session_id: int) -> None:
@@ -810,6 +836,90 @@ class GymDatabase:
             self._conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
         return row["session_id"]
 
+    # ----------------------------------------------------------------- cardio
+
+    def _cardio_row(self, user_id: str, cardio_id: int) -> dict[str, Any]:
+        row = self._one(
+            "SELECT c.* FROM cardio_entries c JOIN sessions s ON s.id = c.session_id WHERE c.id = ? AND s.user_id = ?",
+            (cardio_id, user_id),
+        )
+        if row is None:
+            raise GymError("not_found", f"Cardio entry {cardio_id} not found")
+        return row
+
+    @_locked
+    def add_cardio(
+        self,
+        user_id: str,
+        session_id: int,
+        phase: str,
+        device: str,
+        minutes: int,
+        now: datetime,
+        entry_uuid: str | None = None,
+    ) -> int:
+        """Add a cardio entry to the warm-up or cool-down of a session (also afterwards, in the history).
+
+        Saving the same uuid again changes nothing, so a retried request never creates a duplicate.
+        """
+        self._session_row(user_id, session_id)
+        if phase not in logic.CARDIO_PHASES:
+            raise GymError("invalid_values", f"Unknown phase {phase}")
+        _check_cardio(device, minutes)
+        if entry_uuid:
+            existing = self._one(
+                "SELECT id FROM cardio_entries WHERE uuid = ? AND session_id = ?", (entry_uuid, session_id)
+            )
+            if existing:
+                return existing["id"]
+        position = self._one(
+            "SELECT COALESCE(MAX(position), 0) + 1 AS pos FROM cardio_entries WHERE session_id = ? AND phase = ?",
+            (session_id, phase),
+        )
+        assert position is not None
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO cardio_entries (uuid, session_id, phase, device, minutes, position, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (entry_uuid or uuid4().hex, session_id, phase, device, minutes, position["pos"], _iso(now)),
+            )
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    @_locked
+    def update_cardio(self, user_id: str, cardio_id: int, device: str, minutes: int) -> int:
+        """Change device and minutes of a cardio entry; returns the id of its session."""
+        row = self._cardio_row(user_id, cardio_id)
+        _check_cardio(device, minutes)
+        with self._conn:
+            self._conn.execute(
+                "UPDATE cardio_entries SET device = ?, minutes = ? WHERE id = ?", (device, minutes, cardio_id)
+            )
+        return row["session_id"]
+
+    @_locked
+    def delete_cardio(self, user_id: str, cardio_id: int) -> int:
+        """Delete a cardio entry; returns the id of its session."""
+        row = self._cardio_row(user_id, cardio_id)
+        with self._conn:
+            self._conn.execute("DELETE FROM cardio_entries WHERE id = ?", (cardio_id,))
+            # Keep the order within the phase without gaps.
+            rows = self._all(
+                "SELECT id FROM cardio_entries WHERE session_id = ? AND phase = ? ORDER BY position, id",
+                (row["session_id"], row["phase"]),
+            )
+            for position, other in enumerate(rows, start=1):
+                self._conn.execute("UPDATE cardio_entries SET position = ? WHERE id = ?", (position, other["id"]))
+        return row["session_id"]
+
+    def _session_cardio(self, session_id: int) -> dict[str, list[dict[str, Any]]]:
+        rows = self._all(
+            "SELECT id, phase, device, minutes, position FROM cardio_entries WHERE session_id = ?"
+            " ORDER BY phase, position, id",
+            (session_id,),
+        )
+        return {phase: [row for row in rows if row["phase"] == phase] for phase in logic.CARDIO_PHASES}
+
     # ---------------------------------------------------------------- queries
 
     @_locked
@@ -858,8 +968,11 @@ class GymDatabase:
         if session["ended_at"]:
             delta = datetime.fromisoformat(session["ended_at"]) - datetime.fromisoformat(session["started_at"])
             duration = int(delta.total_seconds())
+        cardio = self._session_cardio(session_id)
         session["items"] = items
+        session["cardio"] = cardio
         session["summary"] = {
+            "cardio": logic.cardio_totals([row for rows in cardio.values() for row in rows]),
             "duration_s": duration,
             "volume": round(sum(e["volume"] for e in done), 2),
             "done": len(done),
@@ -888,7 +1001,8 @@ class GymDatabase:
             " (SELECT COUNT(*) FROM entries e WHERE e.session_id = s.id AND e.skipped = 1) AS skipped,"
             " (SELECT AVG(e.rpe) FROM entries e WHERE e.session_id = s.id AND e.skipped = 0) AS avg_rpe,"
             " (SELECT COALESCE(SUM(t.reps * t.weight), 0) FROM entry_sets t JOIN entries e ON e.id = t.entry_id"
-            "   WHERE e.session_id = s.id AND e.skipped = 0) AS volume"
+            "   WHERE e.session_id = s.id AND e.skipped = 0) AS volume,"
+            " (SELECT COALESCE(SUM(c.minutes), 0) FROM cardio_entries c WHERE c.session_id = s.id) AS cardio_minutes"
             " FROM sessions s JOIN plans p ON p.id = s.plan_id"
             f" WHERE s.user_id = ? AND s.status IN ({marks}) AND s.local_date >= ?"
             " ORDER BY s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
@@ -921,7 +1035,14 @@ class GymDatabase:
             "SELECT MAX(local_date) AS last FROM sessions WHERE user_id = ? AND status = ?", (user_id, STATUS_COMPLETED)
         )
         plan = self._user_plan(user_id)
+        cardio = self._one(
+            "SELECT COALESCE(SUM(c.minutes), 0) AS minutes FROM cardio_entries c JOIN sessions s ON s.id = c.session_id"
+            " WHERE s.user_id = ? AND s.status = ? AND s.local_date >= ?",
+            (user_id, STATUS_COMPLETED, week.isoformat()),
+        )
+        assert cardio is not None
         return {
+            "cardio_week": cardio["minutes"],
             "last_date": last["last"] if last else None,
             "week": count(week),
             "month": count(month),
@@ -966,7 +1087,14 @@ class GymDatabase:
         durations = [s["duration_s"] for s in sessions if s["duration_s"] is not None]
         weeks = max(((today - start) + timedelta(days=1)).days / 7, 1)
         plan = self._user_plan(user_id)
+        cardio_rows = self._all(
+            "SELECT c.phase, c.device, c.minutes, s.local_date AS date FROM cardio_entries c"
+            " JOIN sessions s ON s.id = c.session_id"
+            " WHERE s.user_id = ? AND s.status = ? AND s.local_date >= ?",
+            (user_id, STATUS_COMPLETED, since.isoformat() if since else ""),
+        )
         return {
+            "cardio": logic.cardio_stats(cardio_rows, sessions, start, today, granularity),
             "start": start.isoformat(),
             "end": today.isoformat(),
             "granularity": granularity,
@@ -987,7 +1115,7 @@ class GymDatabase:
     def export_rows(self, user_id: str) -> list[dict[str, Any]]:
         """All data of a user, one row per set (skipped exercises: one row without set)."""
         return self._all(
-            "SELECT s.local_date AS date, s.started_at, s.ended_at, s.status, p.name AS plan,"
+            "SELECT s.id AS session_id, s.local_date AS date, s.started_at, s.ended_at, s.status, p.name AS plan,"
             " x.name AS exercise, x.muscle_group, t.set_no, t.reps, t.seconds, t.weight, e.rpe, e.skipped, e.note,"
             " x.archived"
             " FROM entries e JOIN sessions s ON s.id = e.session_id JOIN plans p ON p.id = s.plan_id"
@@ -998,6 +1126,17 @@ class GymDatabase:
         )
 
     @_locked
+    def export_cardio_rows(self, user_id: str) -> list[dict[str, Any]]:
+        """All cardio entries of a user, one row each."""
+        return self._all(
+            "SELECT s.id AS session_id, s.local_date AS date, s.started_at, s.ended_at, s.status, p.name AS plan,"
+            " c.phase, c.device, c.minutes, c.position"
+            " FROM cardio_entries c JOIN sessions s ON s.id = c.session_id JOIN plans p ON p.id = s.plan_id"
+            " WHERE s.user_id = ? ORDER BY s.started_at, s.id, c.phase DESC, c.position",
+            (user_id,),
+        )
+
+    @_locked
     def export_csv(self, user_id: str) -> str:
-        """All data of a user as CSV text."""
-        return logic.build_csv(self.export_rows(user_id))
+        """All data of a user as CSV text (strength sets and cardio entries)."""
+        return logic.build_csv(self.export_rows(user_id), self.export_cardio_rows(user_id))

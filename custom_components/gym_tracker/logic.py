@@ -11,6 +11,12 @@ from datetime import date, datetime, timedelta
 import io
 from typing import Any
 
+CARDIO_PHASES = ("warmup", "cooldown")
+CARDIO_PHASE_LABELS = {"warmup": "Aufwärmen", "cooldown": "Auslaufen"}
+CARDIO_DEVICES = {"crosstrainer": "Crosstrainer", "bike": "Fahrrad", "treadmill": "Laufband"}
+CARDIO_MIN_MINUTES = 1
+CARDIO_MAX_MINUTES = 180
+
 RANGE_DAYS: dict[str, int | None] = {"4w": 28, "3m": 91, "6m": 182, "1y": 365, "all": None}
 
 # If a session is finished long after the last recorded exercise (forgot to
@@ -158,9 +164,52 @@ def bucketize(sessions: list[dict[str, Any]], start: date, end: date, granularit
     return buckets
 
 
+def cardio_totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Cardio minutes in total, per phase and per device."""
+    return {
+        "minutes": sum(row["minutes"] for row in rows),
+        "by_phase": {phase: sum(r["minutes"] for r in rows if r["phase"] == phase) for phase in CARDIO_PHASES},
+        "by_device": {device: sum(r["minutes"] for r in rows if r["device"] == device) for device in CARDIO_DEVICES},
+    }
+
+
+def cardio_stats(
+    rows: list[dict[str, Any]], sessions: list[dict[str, Any]], start: date, end: date, granularity: str
+) -> dict[str, Any]:
+    """Cardio of a range: totals, share of the training time, weekly/monthly buckets and minutes per session.
+
+    ``rows`` are the cardio entries (with ``date``), ``sessions`` the completed sessions of the range.
+    Cardio is kept apart from volume, intensity and records on purpose.
+    """
+    totals = cardio_totals(rows)
+    duration = sum(s["duration_s"] or 0 for s in sessions)
+    first = week_start(start) if granularity == "week" else month_start(start)
+    buckets = []
+    cursor = first
+    while cursor <= end:
+        nxt = cursor + timedelta(days=7) if granularity == "week" else _next_month(cursor)
+        members = [r for r in rows if cursor <= date.fromisoformat(r["date"]) < nxt]
+        buckets.append(
+            {"start": cursor.isoformat(), "end": (nxt - timedelta(days=1)).isoformat(), **cardio_totals(members)}
+        )
+        cursor = nxt
+    return {
+        **totals,
+        # Share of the time spent in the gym (cardio minutes / duration of the completed sessions).
+        "share": round(totals["minutes"] * 60 / duration, 4) if duration else None,
+        "buckets": buckets,
+        "sessions": [
+            {"session_id": s["id"], "date": s["date"], "minutes": s["cardio_minutes"]}
+            for s in sessions
+            if s.get("cardio_minutes")
+        ],
+    }
+
+
 CSV_HEADER = [
     "Datum", "Start", "Ende", "Status", "Plan", "Übung", "Gruppe", "Satz",
     "Wiederholungen", "Sekunden", "Gewicht (kg)", "RPE", "Übersprungen", "Notiz", "Archiviert",
+    "Cardio-Phase", "Gerät", "Minuten",
 ]  # fmt: skip
 STATUS_LABELS = {"running": "laufend", "completed": "abgeschlossen", "cancelled": "abgebrochen"}
 
@@ -171,13 +220,32 @@ def _csv_number(value: float | None) -> str:
     return f"{value:g}".replace(".", ",")
 
 
-def build_csv(rows: list[dict[str, Any]]) -> str:
-    """CSV for German Excel: semicolon separated, decimal comma, UTF-8 BOM."""
+def _csv_order(row: dict[str, Any]) -> tuple[Any, ...]:
+    """Per session: cardio warm-up, then the exercises, then the cool-down."""
+    phase = {"warmup": 0, None: 1, "cooldown": 2}[row.get("phase")]
+    return (row["started_at"], row.get("session_id", 0), phase)
+
+
+def build_csv(rows: list[dict[str, Any]], cardio_rows: list[dict[str, Any]] | None = None) -> str:
+    """CSV for German Excel: semicolon separated, decimal comma, UTF-8 BOM.
+
+    Strength exercises have one row per set; cardio entries have own rows with phase, device and minutes.
+    """
     out = io.StringIO()
     out.write("﻿")
     writer = csv.writer(out, delimiter=";", lineterminator="\r\n")
     writer.writerow(CSV_HEADER)
-    for row in rows:
+    for row in sorted([*rows, *(cardio_rows or [])], key=_csv_order):
+        if row.get("phase"):
+            status = STATUS_LABELS.get(row["status"], row["status"])
+            writer.writerow(
+                [
+                    row["date"], row["started_at"], row["ended_at"] or "", status, row["plan"], "Cardio",
+                    "", "", "", "", "", "", "", "", "",
+                    CARDIO_PHASE_LABELS[row["phase"]], CARDIO_DEVICES[row["device"]], row["minutes"],
+                ]
+            )  # fmt: skip
+            continue
         writer.writerow(
             [
                 row["date"],
@@ -195,6 +263,9 @@ def build_csv(rows: list[dict[str, Any]]) -> str:
                 "ja" if row["skipped"] else "nein",
                 row["note"] or "",
                 "ja" if row.get("archived") else "nein",
+                "",
+                "",
+                "",
             ]
         )
     return out.getvalue()

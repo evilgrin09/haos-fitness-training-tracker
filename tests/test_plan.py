@@ -143,7 +143,7 @@ def test_archive_keeps_history_and_closes_gaps(db: UserDB) -> None:
     assert stats["exercise"]["archived"] is True
     row = db.export_rows()[0]
     assert (row["exercise"], row["archived"]) == ("Beinbeuger (liegend)", 1)
-    assert db.export_csv().split("\r\n")[1].endswith(";ja")
+    assert db.export_csv().split("\r\n")[1].endswith(";ja;;;")
     assert db.summary(date(2026, 11, 2))["total"] == 1
 
 
