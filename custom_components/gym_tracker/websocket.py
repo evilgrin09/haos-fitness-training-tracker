@@ -204,6 +204,9 @@ async def ws_session_delete(hass: HomeAssistant, store: GymStore, msg: dict[str,
         vol.Optional("sets"): _OPT_INT,
         vol.Optional("reps"): _OPT_INT,
         vol.Optional("seconds"): _OPT_INT,
+        vol.Optional("seconds_per_set"): vol.All(
+            [vol.All(vol.Coerce(int), vol.Range(min=0, max=3600))], vol.Length(min=1, max=20)
+        ),
         vol.Optional("weight"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0))),
         vol.Optional("rpe"): _OPT_INT,
         vol.Optional("note", default=""): cv.string,
@@ -228,6 +231,7 @@ async def ws_entry_save(hass: HomeAssistant, store: GymStore, msg: dict[str, Any
             rpe=msg.get("rpe"),
             note=msg["note"].strip(),
             entry_uuid=msg.get("uuid"),
+            seconds_per_set=msg.get("seconds_per_set"),
         )
         return db.session_detail(uid, msg["session_id"])
 

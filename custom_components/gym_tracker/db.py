@@ -143,7 +143,7 @@ KINDS = (KIND_WEIGHT, KIND_REPS, KIND_TIME)
 
 POINT_KEYS = (
     "session_id", "date", "rpe", "set_count", "reps", "seconds", "avg_reps",
-    "max_reps", "max_seconds", "min_reps", "min_seconds", "weight", "volume",
+    "max_reps", "max_seconds", "min_reps", "min_seconds", "avg_seconds", "weight", "volume",
 )  # fmt: skip
 
 
@@ -685,9 +685,11 @@ class GymDatabase:
 
     def _store_recommendation(self, session_id: int, exercise: dict[str, Any], today: date) -> None:
         """Determine the suggestion of an exercise for a session once, so it stays the same during it."""
-        suggestion = logic.recommend(
-            self._exercise(dict(exercise)), self._completed_history(exercise["id"], session_id), today
-        )
+        session = self._one("SELECT id, started_at FROM sessions WHERE id = ?", (session_id,))
+        assert session is not None
+        exercise = self._exercise(dict(exercise))
+        prefill = logic.next_defaults(exercise, self._previous_entry(exercise["id"], session))
+        suggestion = logic.recommend(exercise, self._completed_history(exercise["id"], session_id), today, prefill)
         if suggestion:
             self._conn.execute(
                 "INSERT OR IGNORE INTO recommendations (session_id, exercise_id, rule, data) VALUES (?, ?, ?, ?)",
@@ -854,11 +856,13 @@ class GymDatabase:
         rpe: int | None = None,
         note: str = "",
         entry_uuid: str | None = None,
+        seconds_per_set: list[int] | None = None,
     ) -> int:
         """Create or replace the entry of an exercise within a session.
 
-        Saving is idempotent per (session, exercise), so a retried request
-        never creates a duplicate.
+        Time exercises can get their seconds per set (e.g. measured with the stopwatch);
+        the number of sets then follows from that list. Saving is idempotent per
+        (session, exercise), so a retried request never creates a duplicate.
         """
         session = self._session_row(user_id, session_id)
         exercise = self._one("SELECT * FROM exercises WHERE id = ?", (exercise_id,))
@@ -866,6 +870,12 @@ class GymDatabase:
             raise GymError("not_found", f"Exercise {exercise_id} not found in this plan")
         timed = exercise["duration_s"] is not None
         rows: list[tuple[int, int | None, int | None, float | None]] = []
+        if seconds_per_set is not None and not skipped:
+            if not timed:
+                raise GymError("invalid", "Seconds per set only exist for time exercises")
+            if not 1 <= len(seconds_per_set) <= 20 or any(not 0 <= value <= 3600 for value in seconds_per_set):
+                raise GymError("invalid", "1 to 20 sets with 0 to 3600 seconds each are required")
+            sets, seconds = len(seconds_per_set), seconds_per_set[0]
         if skipped:
             rpe = None
         else:
@@ -881,9 +891,10 @@ class GymDatabase:
                     raise GymError("invalid", "Weight is required")
             else:
                 weight = None
+            per_set = seconds_per_set or [amount] * sets
             rows = [
-                (number, None if timed else amount, amount if timed else None, weight)
-                for number in range(1, sets + 1)
+                (number, None if timed else value, value if timed else None, weight)
+                for number, value in enumerate(per_set, start=1)
             ]
         with self._conn:
             existing = self._one(

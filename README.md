@@ -26,12 +26,15 @@ Die Screenshots zeigen Beispieldaten.
 - **Schnelle Erfassung** mit großen +/−-Tasten: Sätze, Wiederholungen bzw. Sekunden, Gewicht
   (Schritte 0,5 / 1 / 2,5 kg) und Intensität (RPE 1–10).
 - **Vorbelegung**: Beim ersten Training gelten Startgewicht, unteres Ende der Spanne bzw. Sollzeit
-  aus dem Plan, danach immer die zuletzt erfassten Werte der Übung.
+  aus dem Plan, danach immer die zuletzt erfassten Werte der Übung (bei Zeitübungen die Zeit, die
+  in allen Sätzen gehalten wurde).
 - **Steigerungsvorschläge**: Wurde die Spanne bei niedriger Intensität geschafft, schlägt die App
   z. B. „Heute 65,5 kg probieren?“ vor – übernehmen oder beibehalten. Bei Stillstand gibt es
   Hinweise, bei hoher Anstrengung den Rat, Ausführung, Schlaf und Erholung zu prüfen.
 - **Cardio**: Crosstrainer, Fahrrad oder Laufband in Minuten, beim Aufwärmen und Auslaufen,
   auch mehrere Geräte nacheinander.
+- **Stoppuhr für Zeitübungen** (z. B. Plank): große, aus der Entfernung lesbare Zeit, optionaler
+  3-Sekunden-Vorlauf, rein optische Rückmeldung bei erreichtem Ziel, jeder Satz wird einzeln gemessen.
 - **Überspringen, Reihenfolge ändern, Fortsetzen**: Übungen lassen sich überspringen oder über
   die Übersicht in beliebiger Reihenfolge erledigen. Eine laufende Einheit bleibt erhalten,
   auch wenn die App zwischendurch geschlossen wird.
@@ -138,6 +141,34 @@ je Training, die Aufteilung auf Aufwärmen und Auslaufen und den Anteil an der T
 
 ![Auswertung Cardio: Minuten pro Woche nach Gerät und je Training](docs/images/auswertung-cardio.png)
 
+### Stoppuhr für Zeitübungen
+
+<p>
+  <img src="docs/images/stoppuhr.png" width="32%" alt="Stoppuhr beim Plank: Ziel erreicht, die Karte ist grün">
+  <img src="docs/images/stoppuhr-eingabe.png" width="32%" alt="Eingabe mit den gemessenen Sätzen 33, 31 und 36 Sekunden">
+</p>
+
+Bei Übungen der Art „Sekunden“ steht oben auf dem Übungsbildschirm eine Stoppuhr:
+
+- **Start** antippen – mit eingeschaltetem **3 Sekunden Vorlauf** zählt die Uhr erst 3-2-1 herunter,
+  damit du in Position gehen kannst. Der Vorlauf ist standardmäßig an; die Einstellung wird pro
+  Benutzer gespeichert und gilt auf allen Geräten.
+- Der Balken läuft bis zur Zielzeit. Ist sie erreicht, wird die ganze Karte grün, blinkt einmal
+  kurz auf und zeigt „Ziel erreicht“; die Uhr läuft weiter. Es gibt bewusst **keinen Ton und keine
+  Vibration**. Bei „Bewegung reduzieren“ im Betriebssystem entfällt das Blinken.
+- Zielzeit ist die Sollzeit aus dem Plan; wurde heute ein „+5 Sek.“-Vorschlag übernommen, dessen Wert.
+- **Stopp** übernimmt die Zeit (auf ganze Sekunden gerundet) als Satz. Gemessene Sätze stehen unter
+  der Uhr und lassen sich mit ✕ löschen, z. B. nach einem Fehlstart.
+- Nach dem letzten Ziel-Satz – oder jederzeit mit **Übung abgeschlossen** – öffnet sich die Eingabe
+  mit einer Zeile pro gemessenem Satz; die Werte bleiben änderbar. Gespeichert wird jeder Satz einzeln.
+- Solange die Uhr läuft, bleibt der Bildschirm an (wo der Browser das unterstützt). Die Zeit wird aus
+  Zeitstempeln berechnet; App-Wechsel, Bildschirmsperre oder Neuladen verfälschen sie nicht, und
+  eine laufende Messung samt Sätzen wird nach dem Neuladen fortgesetzt.
+- Die Stoppuhr ist optional: Wer sie nicht nutzt, erfasst wie bisher Sätze × Sekunden.
+
+Bei unterschiedlichen Zeiten pro Satz zeigt der Verlauf z. B. „33 / 31 / 36 Sek.“, das Diagramm
+„Dauer pro Satz“ den Durchschnitt; der Bestwert ist der längste Satz.
+
 ### Steigerungsvorschläge
 
 <p>
@@ -154,7 +185,7 @@ und Entscheidungen stehen im Verlauf.
 | Alle Sätze am oberen Ende der Spanne, RPE ≤ 8 | Gewicht + 2,5 kg (unter 10 kg: + 1 kg), Wdh. wieder am unteren Ende |
 | Zweimal in Folge am oberen Ende, RPE ≤ 6 | doppelter Gewichtsschritt |
 | Unter dem oberen Ende, RPE ≤ 7 | 1–2 Wdh. mehr versuchen |
-| Zeitübung: Sollzeit erreicht, RPE ≤ 7 | + 5 Sekunden |
+| Zeitübung: Sollzeit in allen Sätzen erreicht, RPE ≤ 7 | + 5 Sekunden, ausgehend vom kürzesten Satz |
 | Ohne Gewicht über dem oberen Ende | Hinweis: Zusatzgewicht oder langsamere Ausführung |
 | Stillstand, Ø RPE ≤ 7, Übung mit 2 Ziel-Sätzen | einen Satz mehr (ändert den Plan dauerhaft) |
 | Stillstand, Ø RPE ≤ 7 | Hinweis zum Steigern |
@@ -162,6 +193,8 @@ und Entscheidungen stehen im Verlauf.
 
 - Vorschläge gibt es erst ab zwei abgeschlossenen Einheiten der Übung. Übersprungene Übungen und
   abgebrochene Trainings zählen nicht.
+- Ist die Vorbelegung schon gleich oder höher als der Vorschlag (z. B. weil in einem abgebrochenen
+  Training bereits mit dem höheren Gewicht trainiert wurde), entfällt der Vorschlag.
 - **Stillstand** heißt: in den letzten 4 Wochen oder in den letzten 6 Einheiten (was zuerst
   erreicht ist) keine Steigerung bei Gewicht, Wiederholungen oder Zeit. Stillstands-Hinweise
   stehen auch in der Zusammenfassung und in der Auswertung bei der Übung.

@@ -301,3 +301,19 @@ async def test_recommendation_decision(hass: HomeAssistant, entry, hass_ws_clien
          "weight": 65.5}
     )  # fmt: skip
     assert not (await client.receive_json())["success"]  # RPE is required
+
+
+async def test_measured_seconds_per_set(hass: HomeAssistant, entry, hass_ws_client) -> None:
+    client = await hass_ws_client(hass)
+    session = await _ws(client, "session/start")
+    plank = next(i for i in session["items"] if i["exercise"]["name"] == "Plank")["exercise"]["id"]
+    session = await _ws(
+        client, "entry/save", session_id=session["id"], exercise_id=plank, seconds_per_set=[32, 30, 28], rpe=7
+    )
+    entry = next(i for i in session["items"] if i["exercise"]["id"] == plank)["entry"]
+    assert [s["seconds"] for s in entry["sets"]] == [32, 30, 28]
+    await client.send_json_auto_id(
+        {"type": f"{DOMAIN}/entry/save", "session_id": session["id"], "exercise_id": plank,
+         "seconds_per_set": [], "rpe": 7}
+    )  # fmt: skip
+    assert not (await client.receive_json())["success"]

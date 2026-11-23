@@ -74,6 +74,7 @@ def summarize_sets(sets: list[dict[str, Any]]) -> dict[str, Any]:
         "reps": Counter(reps).most_common(1)[0][0] if reps else None,
         "seconds": Counter(seconds).most_common(1)[0][0] if seconds else None,
         "avg_reps": round(sum(reps) / len(reps), 2) if reps else None,
+        "avg_seconds": round(sum(seconds) / len(seconds), 2) if seconds else None,
         "max_reps": max(reps) if reps else None,
         "max_seconds": max(seconds) if seconds else None,
         "weight": max(weights) if weights else None,
@@ -99,7 +100,8 @@ def next_defaults(exercise: dict[str, Any], previous: dict[str, Any] | None) -> 
         if reps is not None and previous.get("reps") is not None:
             reps = previous["reps"]
         if seconds is not None and previous.get("seconds") is not None:
-            seconds = previous["seconds"]
+            # With different times per set (stopwatch): the time held in every set.
+            seconds = previous.get("min_seconds") or previous["seconds"]
     return {"sets": exercise["target_sets"], "reps": reps, "seconds": seconds, "weight": weight}
 
 
@@ -149,7 +151,11 @@ HINT_RULES = {"recovery", "bodyweight", "stall_push"}
 def _beats(point: dict[str, Any], base: dict[str, Any], kind: str) -> bool:
     """Whether a session shows progress compared to another one."""
     if kind == "time":
-        return (point.get("seconds") or 0) > (base.get("seconds") or 0)
+        # Sets can last differently long (stopwatch): compare the average per set.
+        def held(p: dict[str, Any]) -> float:
+            return p.get("avg_seconds") if p.get("avg_seconds") is not None else (p.get("seconds") or 0)
+
+        return held(point) > held(base)
     if kind == "weight":
         weight, base_weight = point.get("weight") or 0, base.get("weight") or 0
         return weight > base_weight or (weight == base_weight and (point.get("reps") or 0) > (base.get("reps") or 0))
@@ -194,8 +200,38 @@ def weight_step(weight: float) -> float:
     return WEIGHT_STEP_LIGHT_KG if weight < LIGHT_WEIGHT_BELOW_KG else WEIGHT_STEP_KG
 
 
-def recommend(exercise: dict[str, Any], history: list[dict[str, Any]], today: date) -> dict[str, Any] | None:
+def recommend(
+    exercise: dict[str, Any],
+    history: list[dict[str, Any]],
+    today: date,
+    prefill: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Suggestion for the next session of an exercise, or None.
+
+    A suggestion to raise weight, reps or time is left out if the prefill of the session
+    (which also takes cancelled sessions into account) is already at that value or higher.
+    """
+    suggestion = _recommend(exercise, history, today)
+    if suggestion and prefill and _superseded(suggestion, prefill):
+        return None
+    return suggestion
+
+
+def _superseded(suggestion: dict[str, Any], prefill: dict[str, Any]) -> bool:
+    data = suggestion["data"]
+    for rule, key, field in (
+        ("weight", "suggested_weight", "weight"),
+        ("weight_double", "suggested_weight", "weight"),
+        ("reps", "suggested_reps", "reps"),
+        ("time", "suggested_seconds", "seconds"),
+    ):
+        if suggestion["rule"] == rule and prefill.get(field) is not None and prefill[field] >= data[key]:
+            return True
+    return False
+
+
+def _recommend(exercise: dict[str, Any], history: list[dict[str, Any]], today: date) -> dict[str, Any] | None:
+    """The rules behind recommend().
 
     Returns ``{"rule": ..., "data": {...}}``; at most one suggestion per exercise, the first
     matching rule wins: recovery hint, double weight step, weight step, more reps, more
@@ -230,7 +266,8 @@ def recommend(exercise: dict[str, Any], history: list[dict[str, Any]], today: da
             return {"rule": "reps", "data": {**base, "suggested_reps": min(last["reps"] + 1, exercise["reps_max"])}}
         reached = last.get("min_seconds") is not None and last["min_seconds"] >= exercise["duration_s"]
         if kind == "time" and reached and rpe <= TIME_RPE_MAX:
-            return {"rule": "time", "data": {**base, "suggested_seconds": last["seconds"] + TIME_STEP_S}}
+            # "Reached" means in every set, so the next step starts from the shortest set.
+            return {"rule": "time", "data": {**base, "suggested_seconds": last["min_seconds"] + TIME_STEP_S}}
     if kind == "reps" and (last.get("reps") or 0) > exercise["reps_max"]:
         return {"rule": "bodyweight", "data": {**base, "reps_max": exercise["reps_max"]}}
     if stall and stall["avg_rpe"] is not None and stall["avg_rpe"] <= STALL_PUSH_RPE_MAX:

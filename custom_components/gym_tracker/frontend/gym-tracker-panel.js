@@ -139,10 +139,26 @@ function targetText(ex) {
   return `${ex.target_sets} × ${reps}`;
 }
 
+/* Seconds of the sets if they differ (stopwatch), else null. */
+function differentSeconds(entry) {
+  const values = (entry.sets || []).map((set) => set.seconds).filter((v) => v !== null && v !== undefined);
+  return values.length > 1 && values.some((v) => v !== values[0]) ? values : null;
+}
+
+function clock(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
 function entryText(entry, withRpe = true) {
   if (!entry) return "";
   if (entry.skipped) return "Übersprungen";
-  let text = entry.seconds !== null ? `${entry.set_count} × ${entry.seconds} Sek.` : `${entry.set_count} × ${entry.reps}`;
+  const perSet = entry.seconds !== null ? differentSeconds(entry) : null;
+  let text = perSet
+    ? `${perSet.join(" / ")} Sek.`
+    : entry.seconds !== null
+      ? `${entry.set_count} × ${entry.seconds} Sek.`
+      : `${entry.set_count} × ${entry.reps}`;
   if (entry.weight !== null) text += ` @ ${kg(entry.weight)}`;
   if (withRpe && entry.rpe !== null) text += ` · RPE ${entry.rpe}`;
   return text;
@@ -442,6 +458,36 @@ select, input[type=text] { width: 100%; min-height: 48px; font: inherit; color: 
 .rec .row { margin-top: 12px; }
 .rec.hint { border-color: var(--gt-divider); border-width: 1px; }
 .rec.hint h3 { color: var(--gt-muted); }
+.sw { text-align: center; transition: background-color 0.3s, border-color 0.3s, color 0.3s; }
+.sw-head { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; font-weight: 500; color: var(--gt-muted);
+  text-transform: uppercase; letter-spacing: 0.04em; }
+.sw-time { font-size: clamp(76px, 27vw, 128px); font-weight: 600; line-height: 1.05; font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em; margin: 10px 0 0; }
+.sw-state { min-height: 26px; font-size: 20px; font-weight: 600; }
+.sw-bar { height: 12px; border-radius: 6px; background: var(--gt-divider); overflow: hidden; margin: 10px 0 16px; }
+.sw-bar > div { height: 100%; width: 0; background: var(--gt-primary); border-radius: 6px; }
+.btn.sw-btn { min-height: 92px; font-size: 28px; }
+.btn.stop { background: var(--gt-text); border-color: var(--gt-text); color: var(--gt-bg); }
+.sw-opt { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 48px; font-size: 16px; margin-top: 6px; cursor: pointer; }
+.sw-opt input { width: 22px; height: 22px; accent-color: var(--gt-primary); }
+.sw .list { text-align: left; margin-top: 4px; }
+.sw.counting .sw-time { color: var(--gt-primary); }
+/* Target reached: the whole card turns green (white on #1e7a34 = 5.5:1) and flashes once. */
+.sw.reached { background: #1e7a34; border-color: #1e7a34; color: #fff; }
+.sw.reached .sw-head, .sw.reached .muted, .sw.reached .small { color: rgba(255, 255, 255, 0.88); }
+.sw.reached .sw-bar { background: rgba(255, 255, 255, 0.3); }
+.sw.reached .sw-bar > div { background: #fff; }
+.sw.reached .btn.stop { background: #fff; border-color: #fff; color: #1e7a34; }
+.sw.reached .list li { border-color: rgba(255, 255, 255, 0.3); }
+.sw.reached .btn.slim { background: transparent; color: #fff; border-color: rgba(255, 255, 255, 0.6); }
+.sw.flash { animation: sw-flash 0.7s ease-out 1; }
+@keyframes sw-flash { 0% { filter: brightness(1.9); } 100% { filter: brightness(1); } }
+@media (prefers-reduced-motion: reduce) { .sw.flash { animation: none; } .sw { transition: none; } }
+.setrow { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.setrow .no { width: 52px; font-size: 14px; color: var(--gt-muted); text-align: left; }
+.setrow .stepper { flex: 1; gap: 6px; }
+.setrow .stepper button { width: 52px; height: 48px; font-size: 24px; }
+.setrow .stepper .val { font-size: 22px; }
 .toggle { background: none; border: 0; color: var(--gt-primary); font: inherit; font-weight: 500; padding: 10px 0;
   min-height: 44px; cursor: pointer; text-align: left; width: 100%; }
 textarea { width: 100%; min-height: 84px; font: inherit; color: var(--gt-text); background: var(--gt-surface);
@@ -493,6 +539,7 @@ class GymTrackerPanel extends HTMLElement {
     if (this._menuButton) this._menuButton.hass = hass;
     if (first) {
       this._setup();
+      this._loadPrefs();
       this._loadOverview();
     }
   }
@@ -523,11 +570,227 @@ class GymTrackerPanel extends HTMLElement {
     }
     this._resizeObserver.observe(this);
     document.addEventListener("visibilitychange", this._onVisible);
+    // The stopwatch display is computed from time stamps; the interval only redraws it.
+    this._swTimer = setInterval(() => this._swTick(), 100);
+    this._onVisibleWake = () => {
+      if (document.visibilityState === "visible" && this._swRunning()) this._wake(true);
+    };
+    document.addEventListener("visibilitychange", this._onVisibleWake);
   }
 
   disconnectedCallback() {
     this._resizeObserver?.disconnect();
     document.removeEventListener("visibilitychange", this._onVisible);
+    document.removeEventListener("visibilitychange", this._onVisibleWake);
+    clearInterval(this._swTimer);
+    this._wake(false);
+  }
+
+  /* --------------------------------------------------------- stopwatch */
+
+  async _loadPrefs() {
+    // Per Home Assistant user, stored on the server (frontend user data).
+    try {
+      const result = await this._hass.callWS({ type: "frontend/get_user_data", key: "gym_tracker" });
+      this._prefs = { countdown: true, ...(result?.value || {}) };
+    } catch (e) {
+      this._prefs = { countdown: true };
+    }
+  }
+
+  async _savePrefs() {
+    try {
+      await this._hass.callWS({ type: "frontend/set_user_data", key: "gym_tracker", value: this._prefs });
+    } catch (e) {
+      /* not stored – the choice lasts until the panel is reloaded */
+    }
+  }
+
+  get _countdown() {
+    return this._prefs?.countdown ?? true;
+  }
+
+  _swKey() {
+    return `gym_tracker_sw_${this._ov?.user?.id}_${this._session?.id}`;
+  }
+
+  /* Stopwatch state of the running session: {exerciseId: {sets: [seconds], startedAt: ms | null}}. */
+  _swState() {
+    const key = this._swKey();
+    if (this._swLoaded !== key) {
+      this._swLoaded = key;
+      this._swData = {};
+      try {
+        this._swData = JSON.parse(localStorage.getItem(key) || "{}") || {};
+        // Leftovers of other sessions of this user are not needed any more.
+        const prefix = `gym_tracker_sw_${this._ov?.user?.id}_`;
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const other = localStorage.key(i);
+          if (other?.startsWith(prefix) && other !== key) localStorage.removeItem(other);
+        }
+      } catch (e) {
+        /* storage not available – the stopwatch still works until the panel is reloaded */
+      }
+      if (this._swRunning()) this._wake(true);
+    }
+    return this._swData;
+  }
+
+  _sw(exerciseId) {
+    const data = this._swState();
+    if (!data[exerciseId]) data[exerciseId] = { sets: [], startedAt: null };
+    return data[exerciseId];
+  }
+
+  _swSave() {
+    try {
+      localStorage.setItem(this._swKey(), JSON.stringify(this._swData || {}));
+    } catch (e) {
+      /* see _swState */
+    }
+  }
+
+  _swForget(exerciseId) {
+    if (!this._session) return;
+    delete this._swState()[exerciseId];
+    this._swSave();
+    if (!this._swRunning()) this._wake(false);
+  }
+
+  _swClearSession() {
+    try {
+      localStorage.removeItem(this._swKey());
+    } catch (e) {
+      /* see _swState */
+    }
+    this._swData = {};
+    this._swLoaded = null;
+    this._wake(false);
+  }
+
+  _swRunning() {
+    return Object.values(this._swData || {}).some((state) => state.startedAt !== null);
+  }
+
+  async _wake(on) {
+    // Keep the screen on while the stopwatch runs; silently skipped where unsupported.
+    try {
+      if (on && !this._wakeLock && navigator.wakeLock) {
+        this._wakeLock = await navigator.wakeLock.request("screen");
+        this._wakeLock.addEventListener?.("release", () => (this._wakeLock = null));
+      } else if (!on && this._wakeLock) {
+        const lock = this._wakeLock;
+        this._wakeLock = null;
+        await lock.release();
+      }
+    } catch (e) {
+      this._wakeLock = null;
+    }
+  }
+
+  _swTarget(item) {
+    const rec = item.recommendation;
+    if (rec?.rule === "time" && rec.decision === "accepted") return rec.data.suggested_seconds;
+    return item.exercise.duration_s;
+  }
+
+  _stopwatchCard(item) {
+    const ex = item.exercise;
+    const st = this._sw(ex.id);
+    const running = st.startedAt !== null;
+    const number = st.sets.length + 1;
+    const of = number <= ex.target_sets ? `Satz ${number} von ${ex.target_sets}` : `Satz ${number} (zusätzlich)`;
+    const sets = st.sets.length
+      ? `<ul class="list">${st.sets
+          .map((sec, i) => `<li><div class="grow"><span class="small">Satz ${i + 1}</span> · <b>${sec} Sek.</b></div>
+            <button class="btn slim" data-action="sw-del" data-i="${i}" aria-label="Satz ${i + 1} löschen">✕</button></li>`)
+          .join("")}</ul>`
+      : "";
+    return `<div class="card sw" data-sw="${ex.id}">
+      <div class="sw-head"><span>Stoppuhr · ${of}</span><span>Ziel ${this._swTarget(item)} Sek.</span></div>
+      <div class="sw-time">00:00</div>
+      <div class="sw-state"></div>
+      <div class="sw-bar"><div></div></div>
+      <button class="btn sw-btn ${running ? "stop" : "primary"}" data-action="sw-toggle">${running ? "■ Stopp" : "▶ Start"}</button>
+      <label class="sw-opt"><input type="checkbox" data-change="sw-countdown" ${this._countdown ? "checked" : ""}> 3 Sekunden Vorlauf</label>
+      ${sets}
+    </div>`;
+  }
+
+  /* Redraw the running stopwatch from its start time (never from summed-up intervals). */
+  _swTick() {
+    const card = this.shadowRoot?.querySelector(".sw[data-sw]");
+    if (!card || !this._session) return;
+    const item = this._session.items.find((i) => i.exercise.id === Number(card.dataset.sw));
+    if (!item) return;
+    const st = this._sw(item.exercise.id);
+    const target = this._swTarget(item);
+    const now = Date.now();
+    let time = "00:00";
+    let state = "";
+    let progress = 0;
+    let counting = false;
+    let reached = false;
+    if (st.startedAt !== null && now < st.startedAt) {
+      counting = true;
+      time = String(Math.ceil((st.startedAt - now) / 1000));
+      state = "Gleich geht's los";
+    } else if (st.startedAt !== null) {
+      const elapsed = (now - st.startedAt) / 1000;
+      time = clock(elapsed);
+      progress = Math.min(1, elapsed / target);
+      reached = elapsed >= target;
+      if (reached) state = "✓ Ziel erreicht";
+    }
+    card.querySelector(".sw-time").textContent = time;
+    card.querySelector(".sw-state").textContent = state;
+    card.querySelector(".sw-bar > div").style.width = `${progress * 100}%`;
+    card.classList.toggle("counting", counting);
+    if (reached && !card.classList.contains("reached")) {
+      card.classList.add("reached");
+      // Flash only once per set, not again after a redraw of the screen.
+      const mark = `${item.exercise.id}-${st.startedAt}`;
+      if (this._swFlashed !== mark) {
+        this._swFlashed = mark;
+        card.classList.add("flash");
+        card.addEventListener("animationend", () => card.classList.remove("flash"), { once: true });
+      }
+    } else if (!reached) card.classList.remove("reached");
+  }
+
+  _act_sw_toggle() {
+    const item = this._session.items[this._idx];
+    const ex = item.exercise;
+    const st = this._sw(ex.id);
+    const now = Date.now();
+    let added = false;
+    if (st.startedAt === null) {
+      st.startedAt = now + (this._countdown ? 3000 : 0);
+      this._wake(true);
+    } else {
+      // Stop during the countdown: no set.
+      if (now >= st.startedAt) {
+        const seconds = Math.round((now - st.startedAt) / 1000);
+        if (seconds >= 1) {
+          st.sets.push(seconds);
+          added = true;
+        }
+      }
+      st.startedAt = null;
+      if (!this._swRunning()) this._wake(false);
+    }
+    this._swSave();
+    this._render();
+    this._swTick();
+    if (added && st.sets.length >= ex.target_sets) this._openForm(this._session, item, "workout");
+  }
+
+  _act_sw_del({ i }) {
+    const st = this._sw(this._session.items[this._idx].exercise.id);
+    st.sets.splice(Number(i), 1);
+    this._swSave();
+    this._render();
+    this._swTick();
   }
 
   /* ------------------------------------------------------------- basics */
@@ -670,6 +933,7 @@ class GymTrackerPanel extends HTMLElement {
     else content.innerHTML = this._detail ? this._renderDetail() : this._renderHistory();
     this._renderModal();
     this._drawCharts();
+    this._swTick();
   }
 
   _renderNoAccess() {
@@ -928,6 +1192,7 @@ class GymTrackerPanel extends HTMLElement {
         <button class="btn slim" data-action="list">Übersicht</button></div>
       <div class="progress"><div style="width:${(recorded / items.length) * 100}%"></div></div>
       <h1>${esc(ex.name)}</h1>
+      ${ex.duration_s !== null && !entry ? this._stopwatchCard(item) : ""}
       ${recCard}
       <div class="facts">
         <div class="fact"><div class="label">Ziel</div><div class="value">${esc(targetText(ex))}</div></div>
@@ -1171,10 +1436,14 @@ class GymTrackerPanel extends HTMLElement {
       }, legend));
     }
     if (timed) {
-      cards.push(this._chartCard("ex-seconds", "Dauer pro Satz", {
+      cards.push(this._chartCard("ex-seconds", "Dauer pro Satz (Durchschnitt)", {
         type: "line",
         unit: "Sek.",
-        points: points.filter((p) => p.seconds !== null).map((p) => ({ ...base(p), v: p.seconds, mark: p.records.includes("seconds"), tip: `${fmtDate(p.date)}<br><b>${p.set_count} × ${p.seconds} Sek.</b>${star(p, "seconds")}` })),
+        points: points.filter((p) => p.seconds !== null).map((p) => {
+          const same = p.min_seconds === p.max_seconds;
+          const text = same ? `${p.set_count} × ${p.seconds} Sek.` : `${p.set_count} Sätze, Ø ${num(p.avg_seconds, 1)} Sek. (${p.min_seconds}–${p.max_seconds})`;
+          return { ...base(p), v: p.avg_seconds ?? p.seconds, mark: p.records.includes("seconds"), tip: `${fmtDate(p.date)}<br><b>${text}</b>${star(p, "seconds")}` };
+        }),
       }, legend));
     } else {
       cards.push(this._chartCard("ex-reps", "Wiederholungen pro Satz", {
@@ -1343,8 +1612,10 @@ class GymTrackerPanel extends HTMLElement {
     host.innerHTML = `<div class="modal"><div class="sheet">
       <h2>${esc(f.name)}</h2>
       <div class="muted">Ziel ${esc(f.target)}</div>
-      ${this._stepper("sets", "Sätze", f.sets, "")}
-      ${f.timed ? this._stepper("seconds", "Dauer pro Satz", f.seconds, "Sek.") : this._stepper("reps", "Wiederholungen pro Satz", f.reps, "Wdh.")}
+      ${f.perSet
+        ? this._perSetFields(f)
+        : `${this._stepper("sets", "Sätze", f.sets, "")}
+           ${f.timed ? this._stepper("seconds", "Dauer pro Satz", f.seconds, "Sek.") : this._stepper("reps", "Wiederholungen pro Satz", f.reps, "Wdh.")}`}
       ${f.weighted ? this._stepper("weight", "Gewicht", num(f.weight, 2), "kg", steps) : ""}
       <div class="field"><div class="label"><span>Intensität (RPE)</span><span>1 leicht – 10 maximal</span></div>
         <div class="rpe">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((v) => `<button class="${f.rpe === v ? "active" : ""}" data-action="form-rpe" data-v="${v}" aria-label="RPE ${v}">${v}</button>`).join("")}</div>
@@ -1353,7 +1624,7 @@ class GymTrackerPanel extends HTMLElement {
       <div class="field"><div class="label"><span>Notiz</span></div>
         <input type="text" data-input="form-note" value="${esc(f.note)}" placeholder="Optional" maxlength="300"></div>
       <div class="field stack">
-        <button class="btn primary big" data-action="form-save" ${f.rpe ? "" : "disabled"}>${f.rpe ? "Speichern" : "Bitte Intensität wählen"}</button>
+        <button class="btn primary big" data-action="form-save" ${f.rpe && (!f.perSet || f.perSet.length) ? "" : "disabled"}>${f.rpe ? "Speichern" : "Bitte Intensität wählen"}</button>
         <button class="btn" data-action="form-cancel">Abbrechen</button>
       </div></div></div>`;
   }
@@ -1462,7 +1733,46 @@ class GymTrackerPanel extends HTMLElement {
       weight: src ? src.weight : defaults.weight ?? 0,
       rpe: src ? src.rpe : null,
       note: entry ? entry.note : "",
+      perSet: null,
     };
+    if (ex.duration_s !== null) {
+      // Measured sets (stopwatch) or an entry with different times per set: one row per set.
+      const measured = context === "workout" && !src ? this._sw(ex.id).sets : [];
+      if (measured.length) this._form.perSet = [...measured];
+      else if (src && differentSeconds(src)) this._form.perSet = differentSeconds(src);
+    }
+    this._renderModal();
+  }
+
+  _perSetFields(f) {
+    const rows = f.perSet
+      .map((sec, i) => `<div class="setrow"><span class="no">Satz ${i + 1}</span>
+        <div class="stepper">
+          <button data-action="form-set-step" data-i="${i}" data-dir="-1" aria-label="Satz ${i + 1} kürzer">−</button>
+          <div class="val">${sec} <small>Sek.</small></div>
+          <button data-action="form-set-step" data-i="${i}" data-dir="1" aria-label="Satz ${i + 1} länger">+</button>
+        </div>
+        <button class="btn slim" data-action="form-set-del" data-i="${i}" aria-label="Satz ${i + 1} entfernen">✕</button></div>`)
+      .join("");
+    return `<div class="field"><div class="label"><span>Sätze · Sekunden</span><span>gemessen, änderbar</span></div>
+      ${rows || `<div class="small muted">Kein Satz – bitte mindestens einen Satz hinzufügen.</div>`}
+      <button class="btn slim" style="margin-top:10px" data-action="form-set-add">+ Satz</button></div>`;
+  }
+
+  _act_form_set_step({ i, dir }) {
+    const f = this._form;
+    f.perSet[Number(i)] = Math.max(0, Math.min(3600, f.perSet[Number(i)] + Number(dir) * 5));
+    this._renderModal();
+  }
+
+  _act_form_set_del({ i }) {
+    this._form.perSet.splice(Number(i), 1);
+    this._renderModal();
+  }
+
+  _act_form_set_add() {
+    const f = this._form;
+    if (f.perSet.length < 20) f.perSet.push(f.perSet[f.perSet.length - 1] ?? f.seconds ?? 30);
     this._renderModal();
   }
 
@@ -1476,6 +1786,11 @@ class GymTrackerPanel extends HTMLElement {
   }
 
   _onChange(ev) {
+    if (ev.target.dataset?.change === "sw-countdown") {
+      this._prefs = { ...(this._prefs || {}), countdown: ev.target.checked };
+      this._savePrefs();
+      return;
+    }
     if (ev.target.dataset?.change === "exercise") {
       this._exerciseId = Number(ev.target.value);
       this._run(() => this._loadStats());
@@ -1750,12 +2065,14 @@ class GymTrackerPanel extends HTMLElement {
     const f = this._form;
     this._run(async () => {
       const payload = { session_id: f.sessionId, exercise_id: f.exerciseId, sets: f.sets, rpe: f.rpe, note: f.note };
-      if (f.timed) payload.seconds = f.seconds;
+      if (f.perSet) payload.seconds_per_set = f.perSet;
+      else if (f.timed) payload.seconds = f.seconds;
       else payload.reps = f.reps;
       if (f.weighted) payload.weight = f.weight;
       const result = await this._call("entry/save", payload);
       this._form = null;
       if (f.context === "workout") {
+        this._swForget(f.exerciseId);
         this._session = result;
         if (f.isNew) this._gotoNextOpen(this._idx + 1);
         else this._render();
@@ -1788,6 +2105,7 @@ class GymTrackerPanel extends HTMLElement {
   _finish(adopt) {
     this._run(async () => {
       this._summary = await this._call("session/finish", { session_id: this._session.id, adopt });
+      this._swClearSession();
       this._session = null;
       this._adopt = null;
       this._show("summary");
@@ -2027,6 +2345,7 @@ class GymTrackerPanel extends HTMLElement {
       danger: true,
       run: async () => {
         await this._call("session/cancel", { session_id: this._session.id });
+        this._swClearSession();
         this._session = null;
         this._view = "home";
         await this._loadOverview();
