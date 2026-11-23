@@ -19,12 +19,19 @@ Die Screenshots zeigen Beispieldaten.
 
 ## Funktionen
 
-- **Geführtes Training**: Warm-up, dann pro Übung ein Bildschirm mit Ziel, aktuellem Gewicht,
-  Geräteeinstellung und Ausführungshinweis.
+- **Mehrere Benutzer**: Jeder Home-Assistant-Benutzer hat seinen eigenen Plan, seine eigenen
+  Trainings, Auswertungen und Sensoren. Wer das Panel nutzen darf, lässt sich einschränken.
+- **Geführtes Training**: Cardio zum Aufwärmen, Warm-up, dann pro Übung ein Bildschirm mit Ziel,
+  aktuellem Gewicht, Geräteeinstellung und Ausführungshinweis, zum Schluss Cardio zum Auslaufen.
 - **Schnelle Erfassung** mit großen +/−-Tasten: Sätze, Wiederholungen bzw. Sekunden, Gewicht
   (Schritte 0,5 / 1 / 2,5 kg) und Intensität (RPE 1–10).
-- **Gewichtslogik**: Beim ersten Training gilt das Gewicht aus dem Plan, danach immer das
-  zuletzt erfasste Gewicht der Übung.
+- **Vorbelegung**: Beim ersten Training gelten Startgewicht, unteres Ende der Spanne bzw. Sollzeit
+  aus dem Plan, danach immer die zuletzt erfassten Werte der Übung.
+- **Steigerungsvorschläge**: Wurde die Spanne bei niedriger Intensität geschafft, schlägt die App
+  z. B. „Heute 65,5 kg probieren?“ vor – übernehmen oder beibehalten. Bei Stillstand gibt es
+  Hinweise, bei hoher Anstrengung den Rat, Ausführung, Schlaf und Erholung zu prüfen.
+- **Cardio**: Crosstrainer, Fahrrad oder Laufband in Minuten, beim Aufwärmen und Auslaufen,
+  auch mehrere Geräte nacheinander.
 - **Überspringen, Reihenfolge ändern, Fortsetzen**: Übungen lassen sich überspringen oder über
   die Übersicht in beliebiger Reihenfolge erledigen. Eine laufende Einheit bleibt erhalten,
   auch wenn die App zwischendurch geschlossen wird.
@@ -32,13 +39,15 @@ Die Screenshots zeigen Beispieldaten.
   verschieben (↑/↓), ganze Gruppen verschieben, archivieren und wiederherstellen.
 - **Spontane Übung** während des Trainings (z. B. wenn ein Gerät belegt ist) – beim Beenden
   entscheidest du, ob sie in den Plan übernommen wird.
-- **Zusammenfassung** am Ende: Dauer, Gesamtvolumen, Intensität und Gewichtsänderungen.
+- **Zusammenfassung** am Ende: Dauer, Gesamtvolumen, Intensität, Cardio-Minuten,
+  Gewichtsänderungen und Hinweise zur Entwicklung.
 - **Auswertung** für 4 Wochen, 3 Monate, 6 Monate, 1 Jahr oder alles: Trainings pro Woche/Monat,
-  Gesamtvolumen, durchschnittliche Intensität sowie pro Übung Gewicht, Wiederholungen, RPE und
-  Volumen – Bestwerte sind mit ★ markiert.
+  Gesamtvolumen, durchschnittliche Intensität, Cardio nach Gerät und Phase sowie pro Übung
+  Gewicht, Wiederholungen, RPE und Volumen – Bestwerte sind mit ★ markiert.
 - **Verlauf** aller Einheiten: Einträge nachträglich bearbeiten, nachtragen oder löschen,
   CSV-Export aller Daten.
-- **Sensoren** fürs Dashboard: letztes Training, Trainings diese Woche, Trainings diesen Monat.
+- **Sensoren** fürs Dashboard, pro Benutzer: letztes Training, Trainings diese Woche, Trainings
+  diesen Monat, Cardio-Minuten diese Woche.
 - Oberfläche auf Deutsch, Hell-/Dunkelmodus folgt dem Home-Assistant-Theme, keine
   CDN-Abhängigkeiten.
 
@@ -60,21 +69,103 @@ Die Screenshots zeigen Beispieldaten.
 Manuell geht es auch: den Ordner `custom_components/gym_tracker` nach
 `/config/custom_components/` kopieren und Home Assistant neu starten.
 
-Bei der Ersteinrichtung wird der Plan „Ganzkörper-Training“ (10 Übungen, 2–3× pro Woche)
-automatisch angelegt.
+Beim ersten Öffnen des Panels legt jeder Benutzer seinen Plan an: als Kopie der Vorlage
+„Ganzkörper-Training“ (10 Übungen, 2–3× pro Woche) oder als leeren Plan mit Name und Ziel pro Woche.
+
+## Mehrbenutzer
+
+<p>
+  <img src="docs/images/plan-anlegen.png" width="32%" alt="Startbildschirm „Plan anlegen“ mit Vorlage oder leerem Plan">
+</p>
+
+- Gym Tracker erkennt am angemeldeten Home-Assistant-Benutzer, wer das Panel nutzt. Jeder sieht
+  und bearbeitet nur seine eigenen Pläne, Trainings, Auswertungen, seinen Verlauf und CSV-Export –
+  das gilt auch für Admins.
+- Laufende Trainings, die Sperre der Planbearbeitung und spontane Übungen gelten pro Benutzer.
+- **Erlaubte Benutzer**: Unter **Einstellungen → Geräte & Dienste → Gym Tracker → Konfigurieren**
+  lässt sich festlegen, wer Gym Tracker nutzen darf. Leer = alle. Andere Benutzer sehen nur den
+  Hinweis „Kein Zugriff“; die Integration weist ihre Anfragen auch serverseitig ab. Das Panel
+  bleibt in deren Seitenleiste sichtbar, weil Home Assistant Panels nicht pro Benutzer ausblendet.
+
+## Update von Version 0.2.x
+
+Beim ersten Start nach dem Update passiert automatisch:
+
+1. **Sicherung**: Die bisherige Datenbank wird nach `/config/gym_tracker.db.bak-0.2.1` kopiert
+   (der Pfad steht im Log). Eine vorhandene Sicherung wird nie überschrieben.
+2. **Datenbank-Update** ohne Datenverlust: Benutzerzuordnung, Cardio und Empfehlungen kommen hinzu.
+3. **Zuordnung der bisherigen Daten**: Plan, Übungen, Trainings und Einträge gehören dem
+   Home-Assistant-Benutzer **tim-mobile** (gesucht über Anzeige- oder Benutzername). Gibt es ihn
+   nicht genau einmal, wird nichts geraten: Die Daten bleiben unverändert, aber unzugeordnet.
+   Admins sehen dann im Panel einen Hinweis und wählen den Besitzer unter **Konfigurieren →
+   „Bestehende Daten zuordnen an“** (angeboten werden nur Benutzer ohne eigenen Plan). Meldet sich
+   tim-mobile erst später zum ersten Mal an, werden die Daten dabei automatisch zugeordnet.
+4. **Sensoren**: Die bisherigen drei Sensoren behalten ihre entity_ids und gehören jetzt dem
+   Besitzer der bisherigen Daten, Dashboards und Automationen funktionieren weiter.
+
+Zum Zurückkehren auf 0.2.1: Integration auf 0.2.1 zurücksetzen und die Sicherung zurück nach
+`/config/gym_tracker.db` kopieren.
 
 ## Bedienung
 
-1. **Training starten** – das Warm-up abhaken.
-2. Übung ausführen, dann **Übung abgeschlossen** antippen. Die Eingabe ist mit den Sollwerten
-   vorbelegt (Ziel-Sätze, oberes Ende der Wiederholungsspanne, aktuelles Gewicht); meist ist nur
-   die Intensität zu wählen.
-3. Über **Übersicht** lässt sich jede Übung direkt anspringen und das Training beenden.
-4. Unter **Auswertung** und **Verlauf** finden sich Diagramme, vergangene Einheiten und der
+1. **Training starten** – Cardio zum Aufwärmen erfassen oder überspringen, dann das Warm-up abhaken.
+2. Übung ausführen, dann **Übung abgeschlossen** antippen. Die Eingabe ist mit den zuletzt
+   erfassten Werten vorbelegt (Ziel-Sätze, Wiederholungen bzw. Sekunden, Gewicht); die Intensität
+   muss jedes Mal gewählt werden.
+3. Nach der letzten Übung folgt Cardio zum Auslaufen (überspringbar).
+4. Über **Übersicht** lässt sich jede Übung und jeder Cardio-Schritt direkt anspringen und das
+   Training beenden – auch ohne Cardio.
+5. Unter **Auswertung** und **Verlauf** finden sich Diagramme, vergangene Einheiten und der
    CSV-Export.
 
 Die Intensität (RPE) beschreibt, wie anstrengend die Übung war: 10 = keine Wiederholung mehr
 möglich, 8 = zwei Wiederholungen in Reserve, 5 = viele Wiederholungen wären noch möglich.
+
+### Cardio
+
+<p>
+  <img src="docs/images/cardio.png" width="32%" alt="Schritt „Aufwärmen (Cardio)“ mit Gerät, Minuten und erfassten Einträgen">
+</p>
+
+Gerät antippen (Crosstrainer, Fahrrad, Laufband), Minuten mit +/− einstellen oder eintippen,
+**Hinzufügen**. Mehrere Einträge pro Schritt sind möglich, z. B. 5 Min. Fahrrad und 5 Min.
+Laufband; ✎ ändert, ✕ löscht einen Eintrag. Es gibt bewusst keine Vorbelegung und keine Ziele.
+Im Verlauf lässt sich Cardio nachtragen und bearbeiten.
+
+Cardio zählt zur Trainingsdauer, aber **nicht** zu Volumen, Intensität, Bestwerten oder
+Steigerungsvorschlägen. Die Auswertung zeigt Minuten pro Woche bzw. Monat nach Gerät, den Verlauf
+je Training, die Aufteilung auf Aufwärmen und Auslaufen und den Anteil an der Trainingszeit.
+
+![Auswertung Cardio: Minuten pro Woche nach Gerät und je Training](docs/images/auswertung-cardio.png)
+
+### Steigerungsvorschläge
+
+<p>
+  <img src="docs/images/empfehlung.png" width="32%" alt="Übungsbildschirm mit dem Vorschlag „Heute 75,5 kg probieren?“">
+</p>
+
+Beim Start eines Trainings prüft die App für jede Übung die bisherigen Einheiten und zeigt
+höchstens einen Vorschlag auf dem Übungsbildschirm. **Übernehmen** passt die Vorbelegung für
+dieses Training an, **Beibehalten** blendet den Vorschlag bis zum nächsten Training aus. Vorschläge
+und Entscheidungen stehen im Verlauf.
+
+| Situation in der letzten Einheit | Vorschlag |
+|---|---|
+| Alle Sätze am oberen Ende der Spanne, RPE ≤ 8 | Gewicht + 2,5 kg (unter 10 kg: + 1 kg), Wdh. wieder am unteren Ende |
+| Zweimal in Folge am oberen Ende, RPE ≤ 6 | doppelter Gewichtsschritt |
+| Unter dem oberen Ende, RPE ≤ 7 | 1–2 Wdh. mehr versuchen |
+| Zeitübung: Sollzeit erreicht, RPE ≤ 7 | + 5 Sekunden |
+| Ohne Gewicht über dem oberen Ende | Hinweis: Zusatzgewicht oder langsamere Ausführung |
+| Stillstand, Ø RPE ≤ 7, Übung mit 2 Ziel-Sätzen | einen Satz mehr (ändert den Plan dauerhaft) |
+| Stillstand, Ø RPE ≤ 7 | Hinweis zum Steigern |
+| Stillstand, Ø RPE ≥ 9 | kein Steigerungsvorschlag, Hinweis: Ausführung, Schlaf und Erholung prüfen |
+
+- Vorschläge gibt es erst ab zwei abgeschlossenen Einheiten der Übung. Übersprungene Übungen und
+  abgebrochene Trainings zählen nicht.
+- **Stillstand** heißt: in den letzten 4 Wochen oder in den letzten 6 Einheiten (was zuerst
+  erreicht ist) keine Steigerung bei Gewicht, Wiederholungen oder Zeit. Stillstands-Hinweise
+  stehen auch in der Zusammenfassung und in der Auswertung bei der Übung.
+- Alle Schwellwerte stehen als Konstanten in `logic.py`.
 
 ### Plan bearbeiten
 
@@ -110,7 +201,8 @@ bleibt sie archiviert; der Eintrag bleibt in Verlauf und Auswertung.
 ### Wie gezählt wird
 
 - Wochen laufen von Montag bis Sonntag, in der Zeitzone von Home Assistant.
-- Sensoren und Gesamtstatistik zählen nur **abgeschlossene** Einheiten. Abgebrochene Einheiten
+- Sensoren und Gesamtstatistik zählen nur **abgeschlossene** Einheiten; eine Einheit nur mit
+  Cardio zählt als Training. Abgebrochene Einheiten
   bleiben mit ihren Einträgen im Verlauf und zählen für das „zuletzt erfasste Gewicht“.
 - Volumen = Sätze × Wiederholungen × Gewicht. Übungen ohne Gewicht gehen nicht ins Volumen ein.
 - Wird ein Training erst lange nach der letzten Übung beendet (mehr als zwei Stunden), gilt die
@@ -118,11 +210,20 @@ bleibt sie archiviert; der Eintrag bleibt in Verlauf und Auswertung.
 
 ## Sensoren
 
+Jeder Benutzer mit Plan bekommt ein eigenes Gerät „Gym Tracker <Name>“ mit diesen Sensoren,
+z. B. `sensor.gym_tracker_anna_trainings_diese_woche`:
+
 | Sensor | Inhalt |
 |---|---|
 | Letztes Training | Datum der letzten abgeschlossenen Einheit |
 | Trainings diese Woche | Anzahl seit Montag, Attribute `target_min` / `target_max` aus dem Plan |
 | Trainings diesen Monat | Anzahl im laufenden Kalendermonat |
+| Cardio-Minuten diese Woche | Cardio-Minuten der abgeschlossenen Einheiten seit Montag |
+
+Ausnahme: Der Besitzer der Daten aus 0.2.x behält die bisherigen entity_ids
+`sensor.gym_tracker_letztes_training`, `sensor.gym_tracker_trainings_diese_woche` und
+`sensor.gym_tracker_trainings_diesen_monat`. Sein neuer Cardio-Sensor heißt
+`sensor.gym_tracker_tim_mobile_cardio_minuten_diese_woche`.
 
 ## Daten und Backup
 
@@ -130,12 +231,13 @@ Alle Daten liegen in der SQLite-Datei `/config/gym_tracker.db` – unabhängig v
 ohne Löschfrist, und in jedem Home-Assistant-Backup enthalten. Die Datei bleibt auch erhalten,
 wenn die Integration entfernt wird; wer die Daten wirklich löschen will, löscht die Datei von Hand.
 
-Der CSV-Export (Verlauf → **CSV exportieren**) enthält eine Zeile pro Satz, mit Semikolon als
-Trennzeichen und Dezimalkomma, sodass Excel die Datei direkt öffnet. Die letzte Spalte
-„Archiviert“ zeigt, ob die Übung noch Teil des Plans ist.
+Der CSV-Export (Verlauf → **CSV exportieren**) enthält die Daten des angemeldeten Benutzers:
+eine Zeile pro Satz und eigene Zeilen für Cardio (Übung „Cardio“ mit den Spalten
+„Cardio-Phase“, „Gerät“ und „Minuten“), mit Semikolon als Trennzeichen und Dezimalkomma, sodass
+Excel die Datei direkt öffnet. Die Spalte „Archiviert“ zeigt, ob die Übung noch Teil des Plans ist.
 
-Beim Update auf eine neue Version wird die Datenbank automatisch und ohne Datenverlust
-angepasst.
+Beim Update auf eine neue Version wird die Datenbank automatisch und ohne Datenverlust angepasst;
+vorher legt die Integration eine Sicherung `gym_tracker.db.bak-<alte Version>` an.
 
 ## Entwicklung
 
@@ -147,20 +249,24 @@ node --check custom_components/gym_tracker/frontend/gym-tracker-panel.js
 
 - `db.py` – SQLite-Schema, Migrationen (`PRAGMA user_version`) und alle Abfragen, ohne
   Home-Assistant-Abhängigkeit
-- `logic.py` – Gewichtslogik, Volumen, Bestwerte, Zeiträume, CSV
-- `store.py` – führt Datenbankzugriffe im Executor aus (nicht im Event-Loop)
-- `websocket.py` – API für das Panel
+- `logic.py` – Vorbelegung, Steigerungsregeln mit ihren Schwellwerten, Volumen, Bestwerte,
+  Cardio-Auswertung, Zeiträume, CSV
+- `store.py` – führt Datenbankzugriffe im Executor aus (nicht im Event-Loop), ordnet Daten aus
+  0.2.x zu, prüft erlaubte Benutzer
+- `websocket.py` – API für das Panel; jeder Befehl arbeitet nur mit den Daten des anfragenden
+  Benutzers
 - `frontend/gym-tracker-panel.js` – Panel als Webcomponent ohne Build-Schritt, Diagramme als SVG
 
 ## Geplante Ausbaustufen
 
 Das Datenmodell ist darauf vorbereitet, gebaut ist davon noch nichts:
 
-- Mehrere Pläne, Plan-Stammdaten (Name, Zielhäufigkeit, Warm-up) im Panel bearbeiten
+- Mehrere Pläne pro Benutzer, Plan-Stammdaten (Name, Zielhäufigkeit, Warm-up) im Panel bearbeiten
 - Satzpausen-Timer mit Benachrichtigung
-- Steigerungsvorschlag, wenn die Wiederholungsspanne bei niedriger Intensität geschafft wurde
-- Offline-Erfassung im Studio mit späterer Synchronisierung
-- Wiederholungen je Satz einzeln erfassen (die Datenbank speichert bereits eine Zeile pro Satz)
+- Offline-Erfassung im Studio mit späterer Synchronisierung (Einträge und Cardio haben bereits
+  vom Gerät erzeugte IDs, doppelt gesendete Einträge werden erkannt)
+- Wiederholungen je Satz einzeln erfassen (die Datenbank speichert bereits eine Zeile pro Satz);
+  die Steigerungsregeln werten dann automatisch den schwächsten Satz aus
 
 ## Probleme und Wünsche
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 DOMAIN = "gym_tracker"
 NAME = "Gym Tracker"
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 
 DB_FILE = "gym_tracker.db"
 
